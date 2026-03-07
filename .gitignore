@@ -1,0 +1,8 @@
+build/
+.vscode/
+*.so
+*.dll
+*.pdb
+*.exe
+*.obj
+*.o

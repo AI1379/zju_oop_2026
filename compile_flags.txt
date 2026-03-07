@@ -1,0 +1,5 @@
+-Wall
+-Wextra
+-DDEBUG
+-DUSE_MODERN_CPP
+-std=c++26
