@@ -35,6 +35,8 @@ clang++ main.cpp -std=c++23 -DUSE_MODERN_CPP -o main.exe
 ./main.exe test_text.txt
 ```
 
+在 ArchLinux `g++` 15.2.1 与 Windows `clang++` 21.1.8 `x86_64-pc-windows-msvc` 上测试通过。
+
 ## 输入格式
 
 每行包含 4 个字段，由空格分隔：姓名（无空格）与三门课的整数成绩。示例行：
@@ -74,4 +76,4 @@ no    name        score1    score2    score3    average
 python generate_text.py -n 50 -o sample.txt
 ```
 
-- 生成数据的 Python 代码是 Copilot 辅助写的，但是 C++ 部分是手写的。
+- 生成数据的 Python 代码和 README 是 Copilot 辅助写的，但是 C++ 部分是手写的。
