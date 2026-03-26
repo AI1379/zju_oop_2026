@@ -6,3 +6,6 @@ build/
 *.exe
 *.obj
 *.o
+
+# Ignore WSL build artifacts
+*_wsl

@@ -28,7 +28,7 @@ clang++ main.cpp -std=c++14 -o main.exe
 ./main.exe test_text.txt
 ```
 
-- 现代 C++ 实现（可选，使用 C++23 并定义宏 `USE_MODERN_CPP`，需要支持 <format>/<print> 等特性）：
+- 现代 C++ 实现（可选，使用 C++23 并定义宏 `USE_MODERN_CPP`，需要支持 `<format>`/`<print>` 等特性）：
 
 ```bash
 clang++ main.cpp -std=c++23 -DUSE_MODERN_CPP -o main.exe
