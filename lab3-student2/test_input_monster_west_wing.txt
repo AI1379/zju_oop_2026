@@ -1,0 +1,4 @@
+# Test 5: Hit the monster (assuming it's in west wing)
+go up
+go up
+go west

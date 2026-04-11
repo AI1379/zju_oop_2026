@@ -1,0 +1,8 @@
+# Test 6: Invalid commands — type wrong input and see error messages
+hello
+go
+go nowhere
+go east
+go up
+go down
+go west

@@ -1,0 +1,17 @@
+# Test 1: Win the game — find the princess and return to lobby
+# This path explores: lobby → grand staircase → tower base → east wing →
+# dark corridor → treasure room → back to lobby → find princess → lobby
+go up
+go up
+go east
+go up
+go north
+go south
+go down
+go west
+go down
+go down
+go east
+go west
+go west
+go east

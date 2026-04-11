@@ -1,0 +1,4 @@
+# Test 4: Hit the monster (assuming it's in east wing)
+go up
+go up
+go east

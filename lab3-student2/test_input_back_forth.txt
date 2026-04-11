@@ -1,0 +1,7 @@
+# Test 9: Go back and forth between two rooms
+go east
+go west
+go east
+go west
+go east
+go west

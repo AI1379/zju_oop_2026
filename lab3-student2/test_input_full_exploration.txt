@@ -1,0 +1,25 @@
+# Test 7: Full exploration — visit every room in the castle
+# Ground floor
+go east
+go west
+go west
+go east
+# Upper floor
+go up
+go east
+go west
+go west
+go east
+# Tower
+go up
+go east
+go west
+go west
+go east
+go up
+go north
+go south
+go down
+go west
+go down
+go down

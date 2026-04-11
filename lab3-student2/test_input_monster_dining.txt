@@ -1,0 +1,3 @@
+# Test 2: Hit the monster (assuming it's in dining hall — may vary due to random placement)
+# Explore a likely monster path. If the monster is elsewhere, this will not trigger GAME OVER.
+go east

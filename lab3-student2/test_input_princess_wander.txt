@@ -1,0 +1,24 @@
+# Test 10: Rescue princess, wander around, then return to lobby
+# Find princess (path varies — this explores most rooms)
+go up
+go up
+go west
+go east
+go east
+go up
+go north
+go south
+go down
+go west
+go west
+go down
+go east
+go west
+go east
+go up
+go east
+go west
+go down
+go west
+go down
+go down
