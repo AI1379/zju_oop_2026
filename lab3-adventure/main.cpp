@@ -1,7 +1,8 @@
 // Adventure - CLI Castle Exploration Game
-// Lab 3, Object-Oriented Programming, ZJU 2026 Spring
-// Compile: clang++ -std=c++23 -DUSE_MODERN_CPP -Wall -Wextra -o adventure main.cpp
+// Compile: clang++ -std=c++23 -DUSE_MODERN_CPP -Wall -Wextra -o adventure
+// main.cpp
 //    or:   clang++ -std=c++23 -Wall -Wextra -o adventure main.cpp
+// Core logic written in hand but AI optimized UI amd designed map.
 
 #include <algorithm>
 #include <iostream>
@@ -16,10 +17,6 @@ using namespace std;
 #if __cplusplus >= 202302L && defined(USE_MODERN_CPP)
 #include <print>
 #include <ranges>
-#endif
-
-// ========== Modern C++ ==========
-#if __cplusplus >= 202302L && defined(USE_MODERN_CPP)
 
 class Room {
  public:
@@ -62,8 +59,8 @@ class Room {
 
   void printRoomInfo() const {
     auto exits = exitNames();
-    println("Welcome to the {}. There are {} exit{}: {}.",
-            name_, exits.size(), exits.size() == 1 ? "" : "s", fmtExits(exits));
+    println("Welcome to the {}. There are {} exit{}: {}.", name_, exits.size(),
+            exits.size() == 1 ? "" : "s", fmtExits(exits));
     print("> ");
     cout.flush();
   }
@@ -146,23 +143,24 @@ class Game {
   }
 
  private:
+  // Use smart pointers to manage room memory automatically.
   map<string, unique_ptr<Room>> rooms_;
   string cur_ = "lobby";
   bool hasPrincess_ = false;
 
   void buildCastle() {
     // 3 floors: ground / upper / tower
-    rooms_["lobby"]            = make_unique<NormalRoom>("lobby");
-    rooms_["dining hall"]      = make_unique<NormalRoom>("dining hall");
-    rooms_["guard room"]       = make_unique<NormalRoom>("guard room");
-    rooms_["grand staircase"]  = make_unique<NormalRoom>("grand staircase");
-    rooms_["library"]          = make_unique<NormalRoom>("library");
-    rooms_["armory"]           = make_unique<NormalRoom>("armory");
-    rooms_["tower base"]       = make_unique<NormalRoom>("tower base");
-    rooms_["east wing"]        = make_unique<NormalRoom>("east wing");
-    rooms_["west wing"]        = make_unique<NormalRoom>("west wing");
-    rooms_["treasure room"]    = make_unique<TreasureRoom>("treasure room");
-    rooms_["dark corridor"]    = make_unique<DarkCorridor>("dark corridor");
+    rooms_["lobby"] = make_unique<NormalRoom>("lobby");
+    rooms_["dining hall"] = make_unique<NormalRoom>("dining hall");
+    rooms_["guard room"] = make_unique<NormalRoom>("guard room");
+    rooms_["grand staircase"] = make_unique<NormalRoom>("grand staircase");
+    rooms_["library"] = make_unique<NormalRoom>("library");
+    rooms_["armory"] = make_unique<NormalRoom>("armory");
+    rooms_["tower base"] = make_unique<NormalRoom>("tower base");
+    rooms_["east wing"] = make_unique<NormalRoom>("east wing");
+    rooms_["west wing"] = make_unique<NormalRoom>("west wing");
+    rooms_["treasure room"] = make_unique<TreasureRoom>("treasure room");
+    rooms_["dark corridor"] = make_unique<DarkCorridor>("dark corridor");
 
     // ground floor
     rooms_["lobby"]->addExit("east", "dining hall");
@@ -192,8 +190,8 @@ class Game {
   // randomly put monster & princess in two of the candidate rooms
   void placeSpecialRooms() {
     static const vector<string> cands = {
-      "dining hall", "guard room", "library", "armory",
-      "east wing", "west wing", "tower base",
+        "dining hall", "guard room", "library",    "armory",
+        "east wing",   "west wing",  "tower base",
     };
     static mt19937 rng{random_device{}()};
     auto shuffled = cands;
@@ -207,8 +205,7 @@ class Game {
     auto& old = rooms_[key];
     auto p = make_unique<T>(old->name());
     for (auto& dir : old->exitNames()) {
-      if (auto* t = old->findExit(dir))
-        p->addExit(dir, *t);
+      if (auto* t = old->findExit(dir)) p->addExit(dir, *t);
     }
     old = std::move(p);
   }
@@ -263,7 +260,6 @@ auto main() -> int {
   return 0;
 }
 
-// ========== Traditional OOP ==========
 #else
 
 class Room {
@@ -310,8 +306,8 @@ class Room {
   void printRoomInfo() const {
     vector<string> exits = exitNames();
     cout << "Welcome to the " << name_ << ". There are " << exits.size()
-         << " exit" << (exits.size() == 1 ? "" : "s") << ": "
-         << fmtExits(exits) << "." << endl;
+         << " exit" << (exits.size() == 1 ? "" : "s") << ": " << fmtExits(exits)
+         << "." << endl;
     cout << "> " << flush;
   }
 
@@ -343,7 +339,8 @@ class PrincessRoom : public Room {
   explicit PrincessRoom(const string& name) : Room(name) {}
   bool onEnter(bool has_princess) override {
     if (has_princess) {
-      cout << "\nYou come back to the " << name_ << " with the princess." << endl;
+      cout << "\nYou come back to the " << name_ << " with the princess."
+           << endl;
       return true;
     }
     cout << "\nYou open the door of the " << name_ << "..." << endl;
@@ -382,8 +379,7 @@ class Game {
  public:
   Game() : cur_("lobby"), hasPrincess_(false) {}
   ~Game() {
-    for (auto it = rooms_.begin(); it != rooms_.end(); ++it)
-      delete it->second;
+    for (auto it = rooms_.begin(); it != rooms_.end(); ++it) delete it->second;
   }
 
   void run() {
@@ -407,17 +403,17 @@ class Game {
   Game& operator=(const Game&);
 
   void buildCastle() {
-    rooms_["lobby"]            = new NormalRoom("lobby");
-    rooms_["dining hall"]      = new NormalRoom("dining hall");
-    rooms_["guard room"]       = new NormalRoom("guard room");
-    rooms_["grand staircase"]  = new NormalRoom("grand staircase");
-    rooms_["library"]          = new NormalRoom("library");
-    rooms_["armory"]           = new NormalRoom("armory");
-    rooms_["tower base"]       = new NormalRoom("tower base");
-    rooms_["east wing"]        = new NormalRoom("east wing");
-    rooms_["west wing"]        = new NormalRoom("west wing");
-    rooms_["treasure room"]    = new TreasureRoom("treasure room");
-    rooms_["dark corridor"]    = new DarkCorridor("dark corridor");
+    rooms_["lobby"] = new NormalRoom("lobby");
+    rooms_["dining hall"] = new NormalRoom("dining hall");
+    rooms_["guard room"] = new NormalRoom("guard room");
+    rooms_["grand staircase"] = new NormalRoom("grand staircase");
+    rooms_["library"] = new NormalRoom("library");
+    rooms_["armory"] = new NormalRoom("armory");
+    rooms_["tower base"] = new NormalRoom("tower base");
+    rooms_["east wing"] = new NormalRoom("east wing");
+    rooms_["west wing"] = new NormalRoom("west wing");
+    rooms_["treasure room"] = new TreasureRoom("treasure room");
+    rooms_["dark corridor"] = new DarkCorridor("dark corridor");
 
     rooms_["lobby"]->addExit("east", "dining hall");
     rooms_["lobby"]->addExit("west", "guard room");
