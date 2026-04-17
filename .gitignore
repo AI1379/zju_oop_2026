@@ -7,5 +7,7 @@ build/
 *.obj
 *.o
 
+.cache/
+
 # Ignore WSL build artifacts
 *_wsl
