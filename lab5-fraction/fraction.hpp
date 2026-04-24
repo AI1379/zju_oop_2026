@@ -128,19 +128,20 @@ class Fraction<T> {
     }
     if (slash_pos != std::string::npos) {
       size_t end_pos = 0;
-      T numerator = static_cast<T>(
-          std::stoll(str.substr(0, slash_pos), &end_pos));
+      T numerator =
+          static_cast<T>(std::stoll(str.substr(0, slash_pos), &end_pos));
       if (end_pos != slash_pos) {
         throw std::invalid_argument("Invalid fraction format: " + str);
       }
-      T denominator = static_cast<T>(
-          std::stoll(str.substr(slash_pos + 1), &end_pos));
+      T denominator =
+          static_cast<T>(std::stoll(str.substr(slash_pos + 1), &end_pos));
       if (end_pos != str.size() - slash_pos - 1) {
         throw std::invalid_argument("Invalid fraction format: " + str);
       }
       return Fraction(numerator, denominator);
     } else {
-      // Remove the dot and count fractional digits to avoid floating-point issues
+      // Remove the dot and count fractional digits to avoid floating-point
+      // issues
       std::string digits = str;
       digits.erase(dot_pos, 1);
       size_t end_pos = 0;
@@ -154,6 +155,12 @@ class Fraction<T> {
       }
       return Fraction(numerator, denominator);
     }
+  }
+
+  void reduce() {
+    T g = gcd(numerator_, denominator_);
+    numerator_ /= g;
+    denominator_ /= g;
   }
 
  private:

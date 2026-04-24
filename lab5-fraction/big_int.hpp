@@ -8,39 +8,210 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace fraction {
-enum class MulAlgo { Auto, Naive, Karatsuba, FFT, SSA };
+enum class MulAlgo { Auto, Naive, Karatsuba, FFT_NTT, SSA };
+enum class DivAlgo { Auto, Naive, Newton, Burnikel_Ziegler };
 
 class BigInt {
  public:
   BigInt() : is_negative(false) {}
-  BigInt(int64_t value);
+  BigInt(int64_t value) {
+    if (value < 0) {
+      is_negative = true;
+      value = -value;
+    } else {
+      is_negative = false;
+    }
+    while (value > 0) {
+      digits.push_back(static_cast<uint32_t>(value & 0xFFFFFFFF));
+      value >>= 32;
+    }
+  }
+
   BigInt(const std::string& str);
+
+  static BigInt from_hex_string(const std::string& hex_str) {
+    BigInt result;
+    size_t start = 0;
+    if (!hex_str.empty() && hex_str[0] == '-') {
+      result.is_negative = true;
+      start = 1;
+    }
+    for (size_t i = hex_str.size(); i > start;) {
+      uint32_t digit = 0;
+      size_t chunk_start = (i >= start + 8) ? i - 8 : start;
+      for (size_t j = chunk_start; j < i; ++j) {
+        uint8_t value = result.hex_char_to_digit(hex_str[j]);
+        if (value == static_cast<uint8_t>(-1)) {
+          throw std::invalid_argument("Invalid hex character");
+        }
+        digit = (digit << 4) | value;
+      }
+      result.digits.push_back(digit);
+      i = chunk_start;
+    }
+    result.trim();
+    return result;
+  }
 
   // Arithmetic operations
   BigInt operator+(const BigInt& other) const;
   BigInt operator-(const BigInt& other) const;
-  BigInt operator*(const BigInt& other) const;
-  BigInt operator/(const BigInt& other) const;
-  BigInt operator%(const BigInt& other) const;
+  BigInt operator*(const BigInt& other) const { return multiply(other); }
+  BigInt operator/(const BigInt& other) const { return divide(other); }
+  BigInt operator%(const BigInt& other) const { return mod(other); }
 
-  BigInt& operator+=(const BigInt& other);
-  BigInt& operator-=(const BigInt& other);
-  BigInt& operator*=(const BigInt& other);
-  BigInt& operator/=(const BigInt& other);
+  BigInt& operator+=(const BigInt& other) {
+    if (is_negative == other.is_negative) {
+      add_abs(other);
+    } else {
+      if (abs_compare(*this, other) >= 0) {
+        sub_abs(other);
+      } else {
+        BigInt temp = other;
+        temp.sub_abs(*this);
+        *this = std::move(temp);
+      }
+    }
+    return *this;
+  }
+  BigInt& operator-=(const BigInt& other) {
+    if (is_negative != other.is_negative) {
+      add_abs(other);
+    } else {
+      if (abs_compare(*this, other) >= 0) {
+        sub_abs(other);
+      } else {
+        BigInt temp = other;
+        temp.sub_abs(*this);
+        temp.is_negative = !temp.is_negative;  // Flip the sign
+        *this = std::move(temp);
+      }
+    }
+    return *this;
+  }
+  BigInt& operator*=(const BigInt& other) {
+    *this = this->multiply(other);
+    return *this;
+  }
+  BigInt& operator/=(const BigInt& other) {
+    *this = this->divide(other);
+    return *this;
+  }
   BigInt& operator%=(const BigInt& other);
 
-  BigInt operator-() const;  // Unary minus
+  BigInt operator-() const {
+    BigInt result = *this;
+    if (!result.digits.empty()) {
+      result.is_negative = !result.is_negative;
+    }
+    return result;
+  }
 
-  BigInt multiply(const BigInt& other, MulAlgo algo = MulAlgo::Auto)
-      const;  // Multiplication with algorithm selection
+  // In-place operations for multiplication and division, which can be optimized
+  // The algorithm can be specified by the caller, so these functions are public
+  BigInt& multiply_inplace(const BigInt& other, MulAlgo algo = MulAlgo::Auto);
+  BigInt& divide_inplace(const BigInt& other, DivAlgo algo = DivAlgo::Auto);
+
+  BigInt multiply(const BigInt& other, MulAlgo algo = MulAlgo::Auto) const {
+    BigInt result = *this;
+    result.multiply_inplace(other, algo);
+    return result;
+  }
+  BigInt divide(const BigInt& other, DivAlgo algo = DivAlgo::Auto) const {
+    BigInt result = *this;
+    result.divide_inplace(other, algo);
+    return result;
+  }
+  BigInt mod(const BigInt& other, DivAlgo algo = DivAlgo::Auto) const {
+    return *this - (this->divide(other, algo) * other);
+  }
 
   // Comparison operators
-  friend bool operator==(const BigInt& lhs, const BigInt& rhs);
-  friend auto operator<=>(const BigInt& lhs, const BigInt& rhs);
+  friend bool operator==(const BigInt& lhs, const BigInt& rhs) {
+    if (lhs.is_negative != rhs.is_negative) {
+      return false;
+    }
+    // We cannot compare the size of digits if the numbers have leading zeros
+    // if (lhs.digits.size() != rhs.digits.size()) {
+    //   return false;
+    // }
+
+    auto n = std::min(lhs.digits.size(), rhs.digits.size());
+
+    // Not sure if compiler will optimize this loop. Maybe SIMD is needed for
+    // better performance.
+    for (size_t i = 0; i < n; ++i) {
+      if (lhs.digits[i] != rhs.digits[i]) {
+        return false;
+      }
+    }
+    for (size_t i = n; i < lhs.digits.size(); ++i) {
+      if (lhs.digits[i] != 0) {
+        return false;
+      }
+    }
+    for (size_t i = n; i < rhs.digits.size(); ++i) {
+      if (rhs.digits[i] != 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  friend auto operator<=>(const BigInt& lhs, const BigInt& rhs) {
+    // A helper macro to reduce code duplication when we find a non-equal digit
+#define EQUAL_OR_RETURN(expr) \
+  return (expr) ? std::strong_ordering::greater : std::strong_ordering::less
+    if (lhs.is_negative != rhs.is_negative) {
+      EQUAL_OR_RETURN(rhs.is_negative);
+    }
+
+    for (size_t i = rhs.digits.size(); i < lhs.digits.size(); ++i) {
+      if (lhs.digits[i] != 0) {
+        EQUAL_OR_RETURN(!lhs.is_negative);
+      }
+    }
+    for (size_t i = lhs.digits.size(); i < rhs.digits.size(); ++i) {
+      if (rhs.digits[i] != 0) {
+        EQUAL_OR_RETURN(rhs.is_negative);
+      }
+    }
+
+    auto n = std::min(lhs.digits.size(), rhs.digits.size());
+
+    for (size_t i = n; i-- > 0;) {
+      if (lhs.digits[i] != rhs.digits[i]) {
+        if (lhs.is_negative) {
+          EQUAL_OR_RETURN(lhs.digits[i] < rhs.digits[i]);
+        } else {
+          EQUAL_OR_RETURN(lhs.digits[i] > rhs.digits[i]);
+        }
+      }
+    }
+    return std::strong_ordering::equal;
+#undef EQUAL_OR_RETURN
+  }
+
+  static int abs_compare(const BigInt& a, const BigInt& b) {
+    for (size_t i = b.digits.size(); i < a.digits.size(); ++i) {
+      if (a.digits[i] != 0) return 1;
+    }
+    for (size_t i = a.digits.size(); i < b.digits.size(); ++i) {
+      if (b.digits[i] != 0) return -1;
+    }
+    auto n = std::min(a.digits.size(), b.digits.size());
+    for (size_t i = n; i-- > 0;) {
+      if (a.digits[i] != b.digits[i]) {
+        return (a.digits[i] > b.digits[i]) ? 1 : -1;
+      }
+    }
+    return 0;
+  }
 
   // Utility functions
 
@@ -86,6 +257,60 @@ class BigInt {
   // Use 2^32 as the base and auto overflow
   std::vector<uint32_t> digits;  // Each element stores a part of the number
   bool is_negative;              // Sign of the number
+
+  uint8_t hex_char_to_digit(char c) const {
+    if (c >= '0' && c <= '9') {
+      return c - '0';
+    } else if (c >= 'a' && c <= 'f') {
+      return 10 + (c - 'a');
+    } else if (c >= 'A' && c <= 'F') {
+      return 10 + (c - 'A');
+    }
+    throw std::invalid_argument("Invalid hex character");
+  }
+
+  // Internal helper functions for arithmetic operations
+  // Here we just don't care about the sign.
+  void add_abs(const BigInt& other) {
+    uint64_t carry = 0;
+    size_t n = std::max(digits.size(), other.digits.size());
+
+    for (size_t i = 0; i < n || carry > 0; ++i) {
+      if (i == digits.size()) {
+        digits.push_back(0);
+      }
+      // Cast it to 64-bit to prevent overflow, and add the carry
+      uint64_t sum = static_cast<uint64_t>(digits[i]) +
+                     (i < other.digits.size() ? other.digits[i] : 0) + carry;
+
+      // Keep the lower 32 bits in the current digit, and the upper 32 bits as
+      // the new carry. Maybe some ASM trick can be used here.
+      digits[i] = static_cast<uint32_t>(sum & 0xFFFFFFFF);
+      carry = sum >> 32;
+    }
+
+    // Not sure if it is necessary, but it will not cause performance issues.
+    trim();
+  }
+
+  void sub_abs(const BigInt& other) {
+    // Here we just assume *this >= other, and we will handle the sign in the
+    // caller. We can also optimize this function by using SIMD instructions.
+    uint64_t borrow = 0;
+    for (size_t i = 0; i < digits.size(); ++i) {
+      uint64_t A = digits[i];
+      uint64_t B = (i < other.digits.size() ? other.digits[i] : 0);
+
+      if (A < B + borrow) {
+        digits[i] = static_cast<uint32_t>((A + (1ULL << 32)) - B - borrow);
+        borrow = 1;
+      } else {
+        digits[i] = static_cast<uint32_t>(A - B - borrow);
+        borrow = 0;
+      }
+    }
+    trim();
+  }
 };
 
 }  // namespace fraction

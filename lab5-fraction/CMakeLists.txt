@@ -48,6 +48,12 @@ add_executable(fraction_test
 )
 target_link_libraries(fraction_test PRIVATE fraction GTest::gtest_main)
 
+add_executable(big_int_test
+  big_int_test.cpp
+)
+target_link_libraries(big_int_test PRIVATE fraction GTest::gtest_main)
+
 include(GoogleTest)
 gtest_discover_tests(fraction_test)
+gtest_discover_tests(big_int_test)
 
