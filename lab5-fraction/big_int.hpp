@@ -32,7 +32,15 @@ class BigInt {
     }
   }
 
-  BigInt(const std::string& str);
+  BigInt(const std::string& str) {
+    if (str.ends_with("h") || str.ends_with("H")) {
+      *this = from_hex_string(str.substr(0, str.size() - 1));
+    } else {
+      *this = from_dec_string(str);
+    }
+  }
+
+  static BigInt from_dec_string(const std::string& dec_str);
 
   static BigInt from_hex_string(const std::string& hex_str) {
     BigInt result;
@@ -59,8 +67,18 @@ class BigInt {
   }
 
   // Arithmetic operations
-  BigInt operator+(const BigInt& other) const;
-  BigInt operator-(const BigInt& other) const;
+  BigInt operator+(const BigInt& other) const {
+    auto result = *this;
+    result += other;
+    return result;
+  }
+
+  BigInt operator-(const BigInt& other) const {
+    auto result = *this;
+    result -= other;
+    return result;
+  }
+
   BigInt operator*(const BigInt& other) const { return multiply(other); }
   BigInt operator/(const BigInt& other) const { return divide(other); }
   BigInt operator%(const BigInt& other) const { return mod(other); }
@@ -79,6 +97,7 @@ class BigInt {
     }
     return *this;
   }
+
   BigInt& operator-=(const BigInt& other) {
     if (is_negative != other.is_negative) {
       add_abs(other);
@@ -94,15 +113,13 @@ class BigInt {
     }
     return *this;
   }
-  BigInt& operator*=(const BigInt& other) {
-    *this = this->multiply(other);
+
+  BigInt& operator*=(const BigInt& other) { return multiply_inplace(other); }
+  BigInt& operator/=(const BigInt& other) { return divide_inplace(other); }
+  BigInt& operator%=(const BigInt& other) {
+    *this = this->mod(other);
     return *this;
   }
-  BigInt& operator/=(const BigInt& other) {
-    *this = this->divide(other);
-    return *this;
-  }
-  BigInt& operator%=(const BigInt& other);
 
   BigInt operator-() const {
     BigInt result = *this;
@@ -114,7 +131,34 @@ class BigInt {
 
   // In-place operations for multiplication and division, which can be optimized
   // The algorithm can be specified by the caller, so these functions are public
-  BigInt& multiply_inplace(const BigInt& other, MulAlgo algo = MulAlgo::Auto);
+  BigInt& multiply_inplace(const BigInt& other, MulAlgo algo = MulAlgo::Auto) {
+    // This function is just a dispatcher.
+    switch (algo) {
+      case MulAlgo::Auto: {
+        // Dispatch to the appropriate algorithm based on operand sizes
+        if (digits.size() < 32 || other.digits.size() < 32) {
+          return mul_naive(other);
+        } else if (digits.size() < 256 || other.digits.size() < 256) {
+          return mul_karatsuba(other);
+        } else if (digits.size() < 1024 || other.digits.size() < 1024) {
+          // For very large numbers, we can use FFT-based multiplication
+          return mul_fft_ntt(other);
+        } else {
+          // For extremely large numbers, we can use the SSA algorithm
+          return mul_ssa(other);
+        }
+      }
+      case MulAlgo::Naive:
+        return mul_naive(other);
+      case MulAlgo::Karatsuba:
+        return mul_karatsuba(other);
+      case MulAlgo::FFT_NTT:
+        return mul_fft_ntt(other);
+      case MulAlgo::SSA:
+        return mul_ssa(other);
+    }
+    return *this;
+  }
   BigInt& divide_inplace(const BigInt& other, DivAlgo algo = DivAlgo::Auto);
 
   BigInt multiply(const BigInt& other, MulAlgo algo = MulAlgo::Auto) const {
@@ -269,48 +313,20 @@ class BigInt {
     throw std::invalid_argument("Invalid hex character");
   }
 
-  // Internal helper functions for arithmetic operations
-  // Here we just don't care about the sign.
-  void add_abs(const BigInt& other) {
-    uint64_t carry = 0;
-    size_t n = std::max(digits.size(), other.digits.size());
+  // Internal helper functions for arithmetic operations.
+  // Implementations in .cpp — they delegate to span-level primitives
+  // in the detail namespace, sharing logic with karatsuba_core.
+  void add_abs(const BigInt& other);
+  void sub_abs(const BigInt& other);
+  BigInt& mul_naive(const BigInt& other);
 
-    for (size_t i = 0; i < n || carry > 0; ++i) {
-      if (i == digits.size()) {
-        digits.push_back(0);
-      }
-      // Cast it to 64-bit to prevent overflow, and add the carry
-      uint64_t sum = static_cast<uint64_t>(digits[i]) +
-                     (i < other.digits.size() ? other.digits[i] : 0) + carry;
+  BigInt& mul_karatsuba(const BigInt& other);
+  BigInt& mul_fft_ntt(const BigInt& other);
+  BigInt& mul_ssa(const BigInt& other);
 
-      // Keep the lower 32 bits in the current digit, and the upper 32 bits as
-      // the new carry. Maybe some ASM trick can be used here.
-      digits[i] = static_cast<uint32_t>(sum & 0xFFFFFFFF);
-      carry = sum >> 32;
-    }
-
-    // Not sure if it is necessary, but it will not cause performance issues.
-    trim();
-  }
-
-  void sub_abs(const BigInt& other) {
-    // Here we just assume *this >= other, and we will handle the sign in the
-    // caller. We can also optimize this function by using SIMD instructions.
-    uint64_t borrow = 0;
-    for (size_t i = 0; i < digits.size(); ++i) {
-      uint64_t A = digits[i];
-      uint64_t B = (i < other.digits.size() ? other.digits[i] : 0);
-
-      if (A < B + borrow) {
-        digits[i] = static_cast<uint32_t>((A + (1ULL << 32)) - B - borrow);
-        borrow = 1;
-      } else {
-        digits[i] = static_cast<uint32_t>(A - B - borrow);
-        borrow = 0;
-      }
-    }
-    trim();
-  }
+  BigInt& div_naive(const BigInt& other);
+  BigInt& div_newton(const BigInt& other);
+  BigInt& div_burnikel_ziegler(const BigInt& other);
 };
 
 }  // namespace fraction

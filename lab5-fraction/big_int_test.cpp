@@ -296,3 +296,177 @@ TEST(BigIntEdge, LargeAddition) {
   a += BigInt(1);
   EXPECT_EQ(a.to_hex_string(), "000000010000000000000000");
 }
+
+// ============================================================
+// multiply_inplace (naive)
+// ============================================================
+
+TEST(BigIntMulInplace, SmallPositive) {
+  BigInt a(6);
+  a.multiply_inplace(BigInt(7), fraction::MulAlgo::Naive);
+  EXPECT_EQ(a, BigInt(42));
+}
+
+TEST(BigIntMulInplace, ZeroTimesValue) {
+  BigInt a(0);
+  a.multiply_inplace(BigInt(12345), fraction::MulAlgo::Naive);
+  EXPECT_EQ(a, BigInt(0));
+}
+
+TEST(BigIntMulInplace, ValueTimesZero) {
+  BigInt a(12345);
+  a.multiply_inplace(BigInt(0), fraction::MulAlgo::Naive);
+  EXPECT_EQ(a, BigInt(0));
+}
+
+TEST(BigIntMulInplace, Identity) {
+  BigInt a(42);
+  a.multiply_inplace(BigInt(1), fraction::MulAlgo::Naive);
+  EXPECT_EQ(a, BigInt(42));
+}
+
+TEST(BigIntMulInplace, NegativeTimesPositive) {
+  BigInt a(-3);
+  a.multiply_inplace(BigInt(5), fraction::MulAlgo::Naive);
+  EXPECT_EQ(a, BigInt(-15));
+}
+
+TEST(BigIntMulInplace, PositiveTimesNegative) {
+  BigInt a(3);
+  BigInt b(-5);
+  a.multiply_inplace(b, fraction::MulAlgo::Naive);
+  EXPECT_EQ(a, BigInt(-15));
+}
+
+TEST(BigIntMulInplace, NegativeTimesNegative) {
+  BigInt a(-3);
+  a.multiply_inplace(BigInt(-5), fraction::MulAlgo::Naive);
+  EXPECT_EQ(a, BigInt(15));
+}
+
+TEST(BigIntMulInplace, SingleLimbCarry) {
+  // 0xFFFFFFFF * 0xFFFFFFFF = 0xFFFFFFFE00000001
+  BigInt a = H("ffffffff");
+  a.multiply_inplace(H("ffffffff"), fraction::MulAlgo::Naive);
+  EXPECT_EQ(a.to_hex_string(), "fffffffe00000001");
+}
+
+TEST(BigIntMulInplace, MultiLimbBySingle) {
+  // 0xFFFFFFFF * 2 = 0x1FFFFFFFE
+  BigInt a = H("ffffffff");
+  a.multiply_inplace(BigInt(2), fraction::MulAlgo::Naive);
+  EXPECT_EQ(a.to_hex_string(), "00000001fffffffe");
+}
+
+TEST(BigIntMulInplace, MultiLimbByMultiLimb) {
+  // (2^64-1)^2 = 2^128 - 2^65 + 1
+  BigInt a = H("ffffffffffffffff");
+  a.multiply_inplace(H("ffffffffffffffff"), fraction::MulAlgo::Naive);
+  EXPECT_EQ(a.to_hex_string(), "fffffffffffffffe0000000000000001");
+}
+
+TEST(BigIntMulInplace, SelfMultiplication) {
+  // a *= a (squaring), tests this == &other path
+  BigInt a = H("0000ffff");
+  a.multiply_inplace(a, fraction::MulAlgo::Naive);
+  EXPECT_EQ(a.to_hex_string(), "fffe0001");
+}
+
+TEST(BigIntMulInplace, SelfMultiplicationLarge) {
+  BigInt a = H("ffffffffffffffff");
+  a.multiply_inplace(a, fraction::MulAlgo::Naive);
+  EXPECT_EQ(a.to_hex_string(), "fffffffffffffffe0000000000000001");
+}
+
+TEST(BigIntMulInplace, DifferentSizes) {
+  // 3-limb * 1-limb
+  BigInt a = H("00000001ffffffffffffffff");  // 0x1FFFFFFFFFFFFFFFF
+  BigInt b(2);
+  a.multiply_inplace(b, fraction::MulAlgo::Naive);
+  EXPECT_EQ(a.to_hex_string(), "00000003fffffffffffffffe");
+}
+
+TEST(BigIntMulInplace, AllMaxDigits) {
+  // (2^32-1)^3
+  BigInt a = H("ffffffff");
+  a.multiply_inplace(H("ffffffff"), fraction::MulAlgo::Naive);
+  a.multiply_inplace(H("ffffffff"), fraction::MulAlgo::Naive);
+  EXPECT_EQ(a.to_hex_string(), "fffffffd00000002ffffffff");
+}
+
+// ============================================================
+// Karatsuba multiplication
+// ============================================================
+
+TEST(BigIntKaratsuba, SmallFallbackToNaive) {
+  BigInt a(42);
+  a.multiply_inplace(BigInt(7), fraction::MulAlgo::Karatsuba);
+  EXPECT_EQ(a, BigInt(294));
+}
+
+TEST(BigIntKaratsuba, MultiLimbSameAsNaive) {
+  // Compare Karatsuba result against naive on a multi-limb input
+  BigInt a = H("ffffffffffffffff");
+  BigInt expected = a;
+  expected.multiply_inplace(H("ffffffffffffffff"), fraction::MulAlgo::Naive);
+
+  BigInt b = H("ffffffffffffffff");
+  b.multiply_inplace(H("ffffffffffffffff"), fraction::MulAlgo::Karatsuba);
+  EXPECT_EQ(b.to_hex_string(), expected.to_hex_string());
+}
+
+TEST(BigIntKaratsuba, LargeProductSameAsNaive) {
+  // 64-limb * 64-limb: exercises one Karatsuba recursion level
+  std::string sa, sb;
+  for (int i = 0; i < 64; ++i) {
+    sa += "ffffffff";
+    sb += "12345678";
+  }
+  BigInt a = H(sa);
+  BigInt b = H(sb);
+
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::Karatsuba);
+  EXPECT_EQ(result.to_hex_string(), expected.to_hex_string());
+}
+
+TEST(BigIntKaratsuba, AsymmetricSizes) {
+  // 33 limbs * 40 limbs: tests padding logic
+  std::string sa, sb;
+  for (int i = 0; i < 33; ++i) sa += "ffffffff";
+  for (int i = 0; i < 40; ++i) sb += "00000001";
+
+  BigInt a = H(sa);
+  BigInt b = H(sb);
+
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::Karatsuba);
+  EXPECT_EQ(result, expected);
+}
+
+TEST(BigIntKaratsuba, NegativeResult) {
+  BigInt a(12345);
+  BigInt b(-67890);
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::Karatsuba);
+  EXPECT_EQ(result, expected);
+}
+
+TEST(BigIntKaratsuba, SelfMultiplication) {
+  BigInt a = H("ffffffffffffffff");
+  BigInt expected = a;
+  expected.multiply_inplace(expected, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(result, fraction::MulAlgo::Karatsuba);
+  EXPECT_EQ(result, expected);
+}
