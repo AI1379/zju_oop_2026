@@ -5,8 +5,12 @@
 #include "big_int.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <span>
+#include <utility>
+
+#include "utility.hpp"
 
 namespace fraction {
 
@@ -145,6 +149,7 @@ void karatsuba_core(std::span<const uint32_t> x, std::span<const uint32_t> y,
   auto n = x.size();
 
   if (n <= 32) {
+    std::fill(result.begin(), result.end(), 0);
     mul_naive_raw(x, y, result);
     return;
   }
@@ -194,20 +199,73 @@ void karatsuba_core(std::span<const uint32_t> x, std::span<const uint32_t> y,
   // if b1 == b2 then (x1-x0)(y1-y0) >= 0 => the middle product should be neg.
   bool middle_neg = (b1 == b2);  // z1 should be negative
 
-  // Here we use the Two's complement negation trick to make the code simpler
-  // and more efficient, at the cost of modifying z1. This can be easily
-  // optimized with SIMD.
+  int64_t z1_high = 0;
   if (middle_neg) {
-    // z1 = -z1
     for (auto& d : z1) d = ~d;
-    add_to(z1, ONE_SPAN);  // Two's complement negation
+    z1_high = -1 + add_to(z1, ONE_SPAN);
   }
 
-  add_to(z1, z0);
-  add_to(z1, z2);
+  z1_high += add_to(z1, z0);
+  z1_high += add_to(z1, z2);
 
   auto middle = result.subspan(half);
   add_to(middle, z1);
+  if (z1_high > 0) {
+    auto high_limb = static_cast<uint32_t>(z1_high);
+    add_to(middle.subspan(z1.size()), std::span<const uint32_t>(&high_limb, 1));
+  }
+}
+
+static constexpr uint32_t NTT_PRIMES[] = {
+    998244353,   // 2^23 * 7 * 17 + 1, primitive root = 3
+    1004535809,  // 2^21 * 479 + 1, primitive root = 3
+    469762049,   // 2^26 * 7 + 1, primitive root = 3
+};
+
+static constexpr uint32_t NTT_ROOTS[] = {
+    3,  // Primitive root for 998244353
+    3,  // Primitive root for 1004535809
+    3,  // Primitive root for 469762049
+};
+
+void ntt(std::span<uint32_t> a, uint32_t mod, uint32_t primitive_root,
+         bool inverse = false) {
+  auto n = a.size();
+  for (size_t i = 1, j = 0; i < n; ++i) {
+    auto bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) std::swap(a[i], a[j]);
+  }
+
+  for (size_t len = 2; len <= n; len <<= 1) {
+    // Per-level twiddle step: g^((p-1)/len) for forward,
+    // g^(-(p-1)/len) = g^((p-1)-(p-1)/len) for inverse.
+    uint64_t exp = static_cast<uint64_t>(mod - 1) / len;
+    if (inverse) exp = static_cast<uint64_t>(mod - 1) - exp;
+    uint64_t w = modpow(static_cast<uint64_t>(primitive_root), exp,
+                        static_cast<uint64_t>(mod));
+
+    for (size_t i = 0; i < n; i += len) {
+      uint64_t wn = 1;
+      for (size_t j = 0; j < len / 2; ++j) {
+        uint64_t u = a[i + j];
+        uint64_t v = static_cast<uint64_t>(a[i + j + len / 2]) * wn % mod;
+        a[i + j] = (u + v) % mod;
+        a[i + j + len / 2] = (u - v + mod) % mod;
+        wn = wn * w % mod;
+      }
+    }
+  }
+
+  if (inverse) {
+    uint64_t inv_n =
+        modpow(static_cast<uint64_t>(n), static_cast<uint64_t>(mod - 2),
+               static_cast<uint64_t>(mod));
+    for (auto& x : a) {
+      x = static_cast<uint64_t>(x) * inv_n % mod;
+    }
+  }
 }
 
 }  // namespace detail
@@ -298,8 +356,95 @@ BigInt& BigInt::mul_karatsuba(const BigInt& other) {
   return *this;
 }
 
-BigInt& BigInt::mul_fft_ntt(const BigInt&) {
-  throw std::runtime_error("FFT/NTT multiplication not implemented");
+BigInt& BigInt::mul_fft_ntt(const BigInt& other) {
+  bool result_neg = (is_negative != other.is_negative);
+
+  size_t n = digits.size();
+  size_t m = other.digits.size();
+
+  if ((n == 1 && digits[0] == 0) || (m == 1 && other.digits[0] == 0)) {
+    *this = BigInt(0);
+    return *this;
+  }
+
+  if (this == &other) {
+    BigInt tmp = other;
+    return mul_fft_ntt(tmp);
+  }
+
+  // Linear convolution of two vectors of sizes n, m needs n+m coefficients.
+  size_t padded_size = 1;
+  while (padded_size < n + m) padded_size *= 2;
+
+  std::vector<uint32_t> a(padded_size, 0);
+  std::vector<uint32_t> b(padded_size, 0);
+  std::copy(digits.begin(), digits.end(), a.begin());
+  std::copy(other.digits.begin(), other.digits.end(), b.begin());
+
+  // For each of the 3 NTT primes: NTT(a), NTT(b), pointwise multiply, INTT.
+  std::vector<uint32_t> conv[3];
+  for (size_t k = 0; k < 3; ++k) {
+    auto p = detail::NTT_PRIMES[k];
+    auto root = detail::NTT_ROOTS[k];
+
+    auto ak = a;
+    auto bk = b;
+
+    detail::ntt(ak, p, root, false);
+    detail::ntt(bk, p, root, false);
+
+    for (size_t i = 0; i < padded_size; ++i) {
+      ak[i] = static_cast<uint64_t>(ak[i]) * bk[i] % p;
+    }
+
+    detail::ntt(ak, p, root, true);
+    conv[k] = std::move(ak);
+  }
+
+  // CRT reconstruction constants (constexpr, evaluated at compile time).
+  static constexpr uint64_t P1 = detail::NTT_PRIMES[0];
+  static constexpr uint64_t P2 = detail::NTT_PRIMES[1];
+  static constexpr uint64_t P3 = detail::NTT_PRIMES[2];
+  static constexpr uint64_t INV_P1_MOD_P2 =
+      mod_inv(static_cast<uint64_t>(P1), static_cast<uint64_t>(P2));
+  static constexpr uint64_t INV_P1P2_MOD_P3 =
+      mod_inv(static_cast<uint64_t>(P1) * static_cast<uint64_t>(P2),
+              static_cast<uint64_t>(P3));
+
+  std::vector<UInt128> result(padded_size);
+  for (size_t i = 0; i < padded_size; ++i) {
+    uint64_t r1 = conv[0][i];
+    uint64_t r2 = conv[1][i];
+    uint64_t r3 = conv[2][i];
+
+    // Two-step CRT: recover exact coefficient from 3 residues.
+    uint64_t t1 = r1;
+    uint64_t t2 = (r2 + P2 - t1 % P2) % P2 * INV_P1_MOD_P2 % P2;
+    uint64_t r12 = t1 + t2 * P1;  // value mod P1*P2, fits in uint64_t
+    uint64_t t3 = (r3 + P3 - r12 % P3) % P3 * INV_P1P2_MOD_P3 % P3;
+
+    // t3 * P1 * P2 will overflow, we need to use uint128.
+    result[i] = UInt128(t1) + UInt128(t2) * UInt128(P1) +
+                UInt128(t3) * UInt128(P1) * UInt128(P2);
+  }
+
+  // Carry propagation: base-2^32 digits from 128-bit coefficients.
+  digits.resize(padded_size);
+  UInt128 carry = 0;
+  for (size_t i = 0; i < padded_size; ++i) {
+    UInt128 sum = result[i] + carry;
+    digits[i] = static_cast<uint32_t>(static_cast<unsigned long long>(sum));
+    carry = sum >> 32;
+  }
+  while (carry) {
+    digits.push_back(
+        static_cast<uint32_t>(static_cast<unsigned long long>(carry)));
+    carry >>= 32;
+  }
+
+  is_negative = result_neg;
+  trim();
+  return *this;
 }
 
 BigInt& BigInt::mul_ssa(const BigInt&) {

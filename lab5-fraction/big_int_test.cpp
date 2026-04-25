@@ -470,3 +470,191 @@ TEST(BigIntKaratsuba, SelfMultiplication) {
   result.multiply_inplace(result, fraction::MulAlgo::Karatsuba);
   EXPECT_EQ(result, expected);
 }
+
+// ============================================================
+// NTT multiplication
+// ============================================================
+
+TEST(BigIntNTT, SmallSameAsNaive) {
+  BigInt a(42);
+  a.multiply_inplace(BigInt(7), fraction::MulAlgo::FFT_NTT);
+  EXPECT_EQ(a, BigInt(294));
+}
+
+TEST(BigIntNTT, ZeroTimesValue) {
+  BigInt a(0);
+  a.multiply_inplace(BigInt(12345), fraction::MulAlgo::FFT_NTT);
+  EXPECT_EQ(a, BigInt(0));
+}
+
+TEST(BigIntNTT, ValueTimesZero) {
+  BigInt a(12345);
+  a.multiply_inplace(BigInt(0), fraction::MulAlgo::FFT_NTT);
+  EXPECT_EQ(a, BigInt(0));
+}
+
+TEST(BigIntNTT, NegativeResult) {
+  BigInt a(-3);
+  BigInt b(5);
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::FFT_NTT);
+  EXPECT_EQ(result, expected);
+}
+
+TEST(BigIntNTT, NegativeTimesNegative) {
+  BigInt a(-3);
+  BigInt b(-5);
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::FFT_NTT);
+  EXPECT_EQ(result, expected);
+}
+
+TEST(BigIntNTT, SelfMultiplication) {
+  BigInt a = H("ffffffffffffffff");
+  BigInt expected = a;
+  expected.multiply_inplace(expected, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(result, fraction::MulAlgo::FFT_NTT);
+  EXPECT_EQ(result, expected);
+}
+
+TEST(BigIntNTT, MultiLimbSameAsNaive) {
+  BigInt a = H("ffffffffffffffff");
+  BigInt b = H("123456789abcdef0");
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::FFT_NTT);
+  EXPECT_EQ(result, expected);
+}
+
+TEST(BigIntNTT, AllMaxDigitsSmall) {
+  // (2^32-1)^2 — single-limb case, tests NTT with tiny inputs
+  BigInt a = H("ffffffff");
+  BigInt expected = a;
+  expected.multiply_inplace(H("ffffffff"), fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(H("ffffffff"), fraction::MulAlgo::FFT_NTT);
+  EXPECT_EQ(result, expected);
+}
+
+TEST(BigIntNTT, LargeProductSameAsNaive) {
+  // 64-limb * 64-limb: a decent NTT workout
+  std::string sa, sb;
+  for (int i = 0; i < 64; ++i) {
+    sa += "ffffffff";
+    sb += "12345678";
+  }
+  BigInt a = H(sa);
+  BigInt b = H(sb);
+
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::FFT_NTT);
+  EXPECT_EQ(result.to_hex_string(), expected.to_hex_string());
+}
+
+TEST(BigIntNTT, AsymmetricSizes) {
+  // 100-limb * 30-limb: tests asymmetric padding
+  std::string sa, sb;
+  for (int i = 0; i < 100; ++i) sa += "deadbeef";
+  for (int i = 0; i < 30; ++i) sb += "cafef00d";
+
+  BigInt a = H(sa);
+  BigInt b = H(sb);
+
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Karatsuba);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::FFT_NTT);
+  EXPECT_EQ(result, expected);
+}
+
+TEST(BigIntNTT, LargeAllMaxVsNaive) {
+  // 128-limb * 128-limb, all digits 0xFFFFFFFF — compare NTT vs Naive
+  std::string sa;
+  for (int i = 0; i < 128; ++i) sa += "ffffffff";
+
+  BigInt a = H(sa);
+  BigInt b = H(sa);
+
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::FFT_NTT);
+  EXPECT_EQ(result.to_hex_string(), expected.to_hex_string());
+}
+
+TEST(BigIntNTT, Large256LimbsVsNaive) {
+  // 256-limb * 256-limb, all digits 0xFFFFFFFF — stresses CRT range
+  std::string sa;
+  for (int i = 0; i < 256; ++i) sa += "ffffffff";
+
+  BigInt a = H(sa);
+  BigInt b = H(sa);
+
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::FFT_NTT);
+  EXPECT_EQ(result.to_hex_string(), expected.to_hex_string());
+}
+
+TEST(BigIntKaratsuba, LargeAllMaxVsNaive) {
+  // Sanity-check Karatsuba for 512 limbs vs Naive
+  std::string sa;
+  for (int i = 0; i < 512; ++i) sa += "ffffffff";
+
+  BigInt a = H(sa);
+  BigInt b = H(sa);
+
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::Karatsuba);
+
+  if (result != expected) {
+    auto es = expected.to_hex_string();
+    auto rs = result.to_hex_string();
+    size_t pos = 0;
+    while (pos < es.size() && pos < rs.size() && es[pos] == rs[pos]) pos++;
+    ADD_FAILURE() << "Karatsuba mismatch for 512 limbs, first diff at hex char "
+                  << pos << " (limb " << pos / 8 << ")\n"
+                  << "  expected: ..." << es.substr(pos > 16 ? pos - 16 : 0, 40) << "...\n"
+                  << "  result:   ..." << rs.substr(pos > 16 ? pos - 16 : 0, 40) << "...";
+  }
+}
+
+// Bisect to find where Karatsuba breaks with all-max digits
+class KaratsubaSizeTest : public ::testing::TestWithParam<int> {};
+TEST_P(KaratsubaSizeTest, AllMaxVsNaive) {
+  int limbs = GetParam();
+  std::string sa;
+  for (int i = 0; i < limbs; ++i) sa += "ffffffff";
+
+  BigInt a = H(sa);
+  BigInt b = H(sa);
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::Karatsuba);
+  EXPECT_EQ(result, expected) << "Failed at " << limbs << " limbs";
+}
+INSTANTIATE_TEST_SUITE_P(Sizes, KaratsubaSizeTest,
+                          ::testing::Values(64, 96, 128, 160, 192, 256, 320, 384, 448, 512));

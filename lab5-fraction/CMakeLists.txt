@@ -8,6 +8,20 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 message(STATUS "Configuring lab5-fraction")
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  message(STATUS "Using Clang compiler")
+  add_compile_definitions(FRACTION_COMPILER_CLANG=1)
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  message(STATUS "Using GCC compiler")
+  add_compile_definitions(FRACTION_COMPILER_GCC=1)
+elseif(MSVC)
+  message(STATUS "Using MSVC compiler")
+  add_compile_definitions(FRACTION_COMPILER_MSVC=1)
+else()
+  message(WARNING "Unknown compiler: ${CMAKE_CXX_COMPILER_ID}")
+  add_compile_definitions(FRACTION_COMPILER_UNKNOWN=1)
+endif()
+
 enable_testing()
 
 # 使用本地已安装/已构建的 GoogleTest。
@@ -53,7 +67,14 @@ add_executable(big_int_test
 )
 target_link_libraries(big_int_test PRIVATE fraction GTest::gtest_main)
 
+add_executable(int128_test
+  int128_test.cpp
+)
+target_link_libraries(int128_test PRIVATE fraction GTest::gtest_main)
+
+
 include(GoogleTest)
 gtest_discover_tests(fraction_test)
 gtest_discover_tests(big_int_test)
+gtest_discover_tests(int128_test)
 
