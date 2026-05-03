@@ -216,6 +216,311 @@ void karatsuba_core(std::span<const uint32_t> x, std::span<const uint32_t> y,
   }
 }
 
+// A fixed-width residue modulo 2^M + 1 (a Fermat pseudoprime), used by the
+// Schönhage-Strassen Algorithm (SSA) / Fermat Number Transform (FNT) layer.
+//
+// SSA multiplies two large integers by embedding them as polynomials and
+// performing pointwise multiplication via an FFT-like transform in the ring
+// Z/(2^M+1)Z.  Unlike the NTT approach (which works modulo small primes and
+// requires CRT reconstruction), SSA works in a single large Fermat ring where
+// the "twiddle factors" are powers of 2 — so all multiplications in the
+// transform reduce to shifts and adds, which are cheap on big-int limb arrays.
+//
+// Storage layout: the span holds (M/32 + 1) uint32_t limbs.
+//   - limbs[0 .. M/32-1] are the low M bits of the value.
+//   - limbs[M/32] is an extra "carry" limb that can hold 1 when the value
+//     reaches or exceeds the modulus 2^M + 1, enabling easy normalization.
+// M must be a multiple of 32.
+// (FermatElem struct declared in big_int.hpp)
+
+// Set a FermatElem to zero (all limbs = 0).
+void fermat_zero(FermatElem x) { std::fill(x.limbs.begin(), x.limbs.end(), 0); }
+
+// Copy src into dst (both must have the same size).
+void fermat_copy(FermatElem dst, FermatElem src) {
+  std::copy(src.limbs.begin(), src.limbs.end(), dst.limbs.begin());
+}
+
+// Check whether x >= 2^M + 1 (the modulus).
+// The modulus in limb representation is: low limb = 1, all middle limbs = 0,
+// high limb (index n = value_limbs()) = 1.
+// So we check if x's high limb exceeds 1, or equals 1 with any middle limb
+// nonzero, or equals 1 with all middle limbs zero but low limb >= 1.
+bool fermat_ge_modulus(FermatElem x) {
+  auto n = x.value_limbs();
+  if (x.limbs[n] != 1) return x.limbs[n] > 1;
+
+  for (size_t i = n; i-- > 1;) {
+    if (x.limbs[i] != 0) return true;
+  }
+  return x.limbs[0] >= 1;
+}
+
+// Subtract the modulus (2^M + 1) from x in-place.
+// The modulus has value 1 in the low limb and 1 in the high limb (index n),
+// with all middle limbs = 0. We subtract the low-1 and high-1 separately.
+void fermat_sub_modulus(FermatElem x) {
+  auto n = x.value_limbs();
+
+  // Subtract 1 from the low limb, propagating borrow through middle limbs.
+  uint64_t borrow = 1;
+  for (size_t i = 0; i < x.limbs.size() && borrow; ++i) {
+    uint64_t cur = x.limbs[i];
+    if (cur < borrow) {
+      x.limbs[i] = uint32_t(cur + (1ULL << 32) - borrow);
+      borrow = 1;
+    } else {
+      x.limbs[i] = uint32_t(cur - borrow);
+      borrow = 0;
+    }
+  }
+
+  // Subtract 1 from the high limb (index n). No further propagation needed.
+  borrow = 1;
+  uint64_t cur = x.limbs[n];
+  if (cur < borrow) {
+    x.limbs[n] = uint32_t(cur + (1ULL << 32) - borrow);
+  } else {
+    x.limbs[n] = uint32_t(cur - borrow);
+  }
+}
+
+// Reduce x into the range [0, 2^M] by subtracting the modulus until x < 2^M+1.
+// In practice the value rarely exceeds the modulus by more than a small
+// multiple, so this loop executes at most 2-3 times.
+void fermat_normalize(FermatElem x) {
+  while (fermat_ge_modulus(x)) {
+    fermat_sub_modulus(x);
+  }
+}
+
+// Compare two FermatElem values lexicographically from the high limb down.
+// Returns -1 if a < b, 0 if equal, 1 if a > b.
+int fermat_compare(FermatElem a, FermatElem b) {
+  for (size_t i = a.limbs.size(); i-- > 0;) {
+    if (a.limbs[i] != b.limbs[i]) return a.limbs[i] < b.limbs[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+// Raw addition/subtraction on FermatElem — delegates to the span-level
+// add_into / sub_into, which are identical when all spans are the same size.
+uint32_t fermat_add_raw(FermatElem out, FermatElem a, FermatElem b) {
+  return add_into(out.limbs, a.limbs, b.limbs);
+}
+
+uint32_t fermat_sub_raw(FermatElem out, FermatElem a, FermatElem b) {
+  return sub_into(out.limbs, a.limbs, b.limbs);
+}
+
+// Modular addition: out = (a + b) mod (2^M + 1).
+// Adds first, then normalizes to bring the result below the modulus.
+void fermat_add(FermatElem out, FermatElem a, FermatElem b) {
+  fermat_add_raw(out, a, b);
+  fermat_normalize(out);
+}
+
+// Modular subtraction: out = (a - b) mod (2^M + 1).
+// If a >= b, a simple subtraction suffices.
+// If a < b, we compute (2^M + 1 + a - b) instead — adding the modulus first
+// limb-by-limb to avoid underflow, then normalizing.
+void fermat_sub(FermatElem out, FermatElem a, FermatElem b) {
+  if (fermat_compare(a, b) >= 0) {
+    fermat_sub_raw(out, a, b);
+    return;
+  }
+
+  // a < b: compute (2^M + 1) + a - b per limb.
+  // Conceptually this is add_into(a, modulus) + sub_into(result, b), but the
+  // two are fused into a single loop to handle aliasing: fermat_butterfly calls
+  // fermat_sub(b, scratch, b) where out == b_param. A two-step decomposition
+  // would overwrite b before reading it. The fused loop reads a[i] and b[i]
+  // before writing out[i], so all aliasing patterns are safe.
+  auto n = out.value_limbs();
+  uint64_t carry = 0;
+  uint64_t borrow = 0;
+  for (size_t i = 0; i < out.limbs.size(); ++i) {
+    uint64_t modulus_limb = (i == 0 || i == n) ? 1 : 0;
+    uint64_t sum = uint64_t(a.limbs[i]) + modulus_limb + carry;
+    carry = sum >> 32;
+
+    uint64_t low = uint32_t(sum);
+    uint64_t subtrahend = uint64_t(b.limbs[i]) + borrow;
+    if (low < subtrahend) {
+      out.limbs[i] = uint32_t(low + (1ULL << 32) - subtrahend);
+      borrow = 1;
+    } else {
+      out.limbs[i] = uint32_t(low - subtrahend);
+      borrow = 0;
+    }
+  }
+  fermat_normalize(out);
+}
+
+// Multiply by 2^shift_bits in the Fermat ring: out = in * 2^s mod (2^M + 1).
+//
+// Key property: 2^M ≡ -1 (mod 2^M+1), so 2^(2M) ≡ 1, period = 2M.
+//
+// Algorithm: word-level shift into a double-width buffer, then reduce
+// via the identity in*2^s = low + high*2^M ≡ low - high (mod 2^M+1).
+// If the original shift was >= M, we additionally negate the result
+// (since 2^(M+s) = -2^s).
+void fermat_mul_pow2(FermatElem out, FermatElem in, size_t shift_bits) {
+  auto M = in.modulus_bits();
+  auto n = in.value_limbs();
+  auto period = M * 2;
+  if (period == 0) return;
+
+  shift_bits %= period;
+  if (shift_bits == 0) {
+    if (out.limbs.data() != in.limbs.data()) fermat_copy(out, in);
+    return;
+  }
+
+  bool neg = (shift_bits >= M);
+  if (neg) shift_bits -= M;
+  // shift_bits < M now.
+
+  // Copy in's value limbs into a 2n-limb temp, then word-shift left.
+  thread_local std::vector<uint32_t> tmp;
+  tmp.assign(2 * n, 0);
+  std::copy(in.limbs.begin(), in.limbs.begin() + n, tmp.begin());
+
+  size_t limb_shift = shift_bits / 32;
+  size_t bit_shift = shift_bits % 32;
+
+  // Limb-level shift: move limbs up by limb_shift positions.
+  for (size_t i = 2 * n; i-- > 0;) {
+    tmp[i] = (i >= limb_shift) ? tmp[i - limb_shift] : 0;
+  }
+  // Sub-word bit shift.
+  if (bit_shift > 0) {
+    uint32_t carry = 0;
+    for (size_t i = limb_shift; i < 2 * n; ++i) {
+      uint32_t new_carry = tmp[i] >> (32 - bit_shift);
+      tmp[i] = (tmp[i] << bit_shift) | carry;
+      carry = new_carry;
+    }
+  }
+
+  // Split at bit M (limb n): low = tmp[0..n-1], high = tmp[n..2n-1].
+  // result = low - high mod (2^M+1).
+  std::copy(tmp.begin(), tmp.begin() + n, out.limbs.begin());
+  out.limbs[n] = 0;
+
+  auto high = std::span<const uint32_t>(tmp.data() + n, n);
+  auto borrow = sub_from(out.limbs.first(n), high);
+  if (borrow) {
+    // Underflow: stored value is (low + 2^M - high), need (low - high + 2^M + 1).
+    // Difference is 1, so just add 1 and propagate carry.
+    uint64_t carry = 1;
+    for (size_t i = 0; i < n; ++i) {
+      uint64_t s = uint64_t(out.limbs[i]) + carry;
+      out.limbs[i] = uint32_t(s);
+      carry = s >> 32;
+    }
+    out.limbs[n] = uint32_t(carry);
+  }
+
+  // If shift was >= M, negate: out = (2^M+1) - out.
+  if (neg) {
+    // Save current value into tmp (which is no longer needed).
+    std::copy(out.limbs.begin(), out.limbs.end(), tmp.begin());
+    // Set out to modulus: limbs[0]=1, limbs[1..n-1]=0, limbs[n]=1.
+    out.limbs[0] = 1;
+    for (size_t i = 1; i < n; ++i) out.limbs[i] = 0;
+    out.limbs[n] = 1;
+    // out = modulus - saved_value.
+    sub_from(out.limbs, std::span<const uint32_t>(tmp.data(), n + 1));
+  }
+
+  fermat_normalize(out);
+}
+
+// Butterfly operation for the Fermat Number Transform (FNT).
+// Given two FermatElem values and a "twiddle" shift s, computes:
+//   a' = a + b * 2^s    (mod 2^M + 1)
+//   b' = a - b * 2^s    (mod 2^M + 1)
+//
+// This is the analogue of an FFT butterfly, but the twiddle factor is 2^s
+// instead of a complex root of unity. The FNT is a DFT over Z/(2^M+1)Z where
+// 2 is a 2M-th root of unity (since 2^M ≡ -1, 2^(2M) ≡ 1).
+//
+// scratch is temporary storage used to save a copy of the original a.
+void fermat_butterfly(FermatElem a, FermatElem b, size_t twiddle_shift,
+                      FermatElem scratch) {
+  fermat_copy(scratch, a);
+  fermat_mul_pow2(b, b, twiddle_shift);
+  fermat_add(a, scratch, b);
+  fermat_sub(b, scratch, b);
+}
+
+// General modular multiplication: out = a * b mod (2^M + 1).
+//
+// A FermatElem stores value = a_low + a_high * 2^M where a_high is the carry
+// limb (0 or 1).  Using 2^M ≡ -1 and 2^(2M) ≡ 1:
+//   a * b = (a_low + a_h*2^M)(b_low + b_h*2^M)
+//         ≡ a_low*b_low − a_h*b_low − b_h*a_low + a_h*b_h  (mod 2^M+1)
+//
+// Step 1: compute a_low * b_low via schoolbook + low-high reduction.
+// Step 2: apply cross-term corrections (subtract b_low if a_h, etc.)
+//         using fermat_sub/fermat_add which handle aliasing and normalization.
+// scratch must hold at least 2 * a.value_limbs() uint32_t values.
+void fermat_mul(FermatElem out, FermatElem a, FermatElem b,
+                std::span<uint32_t> scratch) {
+  auto n = a.value_limbs();
+
+  // Save a_low and b_low before out is modified (out may alias a and/or b).
+  thread_local std::vector<uint32_t> saved_a, saved_b;
+  saved_a.assign(a.limbs.begin(), a.limbs.begin() + n);
+  saved_a.push_back(0);
+  saved_b.assign(b.limbs.begin(), b.limbs.begin() + n);
+  saved_b.push_back(0);
+
+  bool a_high = a.limbs[n] != 0;
+  bool b_high = b.limbs[n] != 0;
+
+  // Step 1: a_low * b_low, reduced mod (2^M+1).
+  auto prod = scratch.subspan(0, 2 * n);
+  std::fill(prod.begin(), prod.end(), 0);
+  mul_naive_raw(std::span<const uint32_t>(saved_a).first(n),
+                std::span<const uint32_t>(saved_b).first(n), prod);
+
+  auto low = prod.subspan(0, n);
+  auto high = prod.subspan(n, n);
+  std::copy(low.begin(), low.end(), out.limbs.begin());
+  out.limbs[n] = 0;
+
+  auto borrow = sub_from(out.limbs.first(n), high);
+  if (borrow) {
+    uint64_t carry = 1;
+    for (size_t i = 0; i < n; ++i) {
+      uint64_t s = uint64_t(out.limbs[i]) + carry;
+      out.limbs[i] = uint32_t(s);
+      carry = s >> 32;
+    }
+    out.limbs[n] = uint32_t(carry);
+  }
+
+  // Step 2: corrections for carry limbs.
+  FermatElem a_low_fe{std::span<uint32_t>(saved_a)};
+  FermatElem b_low_fe{std::span<uint32_t>(saved_b)};
+
+  if (a_high) fermat_sub(out, out, b_low_fe);
+  if (b_high) fermat_sub(out, out, a_low_fe);
+  if (a_high && b_high) {
+    // +1 from a_h * b_h = 1
+    uint64_t carry = 1;
+    for (size_t i = 0; i <= n; ++i) {
+      uint64_t s = uint64_t(out.limbs[i]) + carry;
+      out.limbs[i] = uint32_t(s);
+      carry = s >> 32;
+    }
+  }
+
+  fermat_normalize(out);
+}
+
 static constexpr uint32_t NTT_PRIMES[] = {
     998244353,   // 2^23 * 7 * 17 + 1, primitive root = 3
     1004535809,  // 2^21 * 479 + 1, primitive root = 3
@@ -264,6 +569,67 @@ void ntt(std::span<uint32_t> a, uint32_t mod, uint32_t primitive_root,
                static_cast<uint64_t>(mod));
     for (auto& x : a) {
       x = static_cast<uint64_t>(x) * inv_n % mod;
+    }
+  }
+}
+
+// Fermat Number Transform (FNT) — iterative Cooley-Tukey over Z/(2^M+1)Z.
+// Operates on a flat buffer of L FermatElem values, each elem_limbs uint32_t.
+// The primitive root is 2 (a 2M-th root of unity). Twiddle factors are powers
+// of 2, applied via fermat_butterfly.
+//
+// Forward:  X[k] = sum_{j=0}^{L-1} x[j] * 2^(j*k*2M/L)
+// Inverse:  x[j] = (1/L) * sum_{k=0}^{L-1} X[k] * 2^(-j*k*2M/L)
+// Division by L = 2^k is a shift by (2M - k) in the Fermat ring.
+void fnt(std::span<uint32_t> buffer, size_t elem_limbs, size_t transform_len,
+         bool inverse) {
+  auto L = transform_len;
+  auto M = (elem_limbs - 1) * 32;
+
+  // Bit-reversal permutation (swap whole FermatElem blocks).
+  for (size_t i = 1, j = 0; i < L; ++i) {
+    auto bit = L >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      for (size_t k = 0; k < elem_limbs; ++k)
+        std::swap(buffer[i * elem_limbs + k], buffer[j * elem_limbs + k]);
+    }
+  }
+
+  // Scratch FermatElem for butterfly.
+  thread_local std::vector<uint32_t> scratch_buf;
+  scratch_buf.assign(elem_limbs, 0);
+  FermatElem scratch{std::span<uint32_t>(scratch_buf)};
+
+  // Butterfly stages.
+  for (size_t len = 2; len <= L; len <<= 1) {
+    size_t half = len / 2;
+    size_t twiddle_step = 2 * M / len;
+    if (inverse) twiddle_step = 2 * M - twiddle_step;
+
+    for (size_t i = 0; i < L; i += len) {
+      size_t twiddle_shift = 0;
+      for (size_t j = 0; j < half; ++j) {
+        FermatElem a{buffer.subspan((i + j) * elem_limbs, elem_limbs)};
+        FermatElem b{buffer.subspan((i + j + half) * elem_limbs, elem_limbs)};
+
+        fermat_butterfly(a, b, twiddle_shift, scratch);
+
+        twiddle_shift += twiddle_step;
+        if (twiddle_shift >= 2 * M) twiddle_shift -= 2 * M;
+      }
+    }
+  }
+
+  // Inverse: divide each element by L = 2^k, i.e. multiply by 2^(2M - k).
+  if (inverse) {
+    size_t log_L = 0;
+    for (auto tmp = L; tmp > 1; tmp >>= 1) ++log_L;
+    size_t inv_shift = 2 * M - log_L;
+    for (size_t i = 0; i < L; ++i) {
+      FermatElem elem{buffer.subspan(i * elem_limbs, elem_limbs)};
+      fermat_mul_pow2(elem, elem, inv_shift);
     }
   }
 }
@@ -447,8 +813,134 @@ BigInt& BigInt::mul_fft_ntt(const BigInt& other) {
   return *this;
 }
 
-BigInt& BigInt::mul_ssa(const BigInt&) {
-  throw std::runtime_error("SSA multiplication not implemented");
+// Schönhage-Strassen multiplication.
+// Strategy: split inputs into pieces of M bits, embed as polynomials,
+// perform FNT (Fermat Number Transform), multiply pointwise mod (2^M+1),
+// then inverse FNT and carry propagation.
+//
+// The FermatElem + fermat_butterfly infrastructure above provides the
+// modular arithmetic primitives. Still needs: FNT implementation, the
+// top-level mul_ssa driver that chooses M, splits operands, and assembles
+// the final product.
+BigInt& BigInt::mul_ssa(const BigInt& other) {
+  bool result_neg = (is_negative != other.is_negative);
+
+  size_t n = digits.size();
+  size_t m = other.digits.size();
+
+  if ((n == 1 && digits[0] == 0) || (m == 1 && other.digits[0] == 0)) {
+    *this = BigInt(0);
+    return *this;
+  }
+
+  if (this == &other) {
+    BigInt tmp = other;
+    return mul_ssa(tmp);
+  }
+
+  // Fallback for moderate sizes (SSA has high overhead).
+  if (n < 64 || m < 64) return mul_naive(other);
+  if (n < 1024 || m < 1024) return mul_fft_ntt(other);
+
+  // === Parameter selection ===
+  // Choose transform length L = 2^k and modulus M (multiple of 32) such that:
+  //   1) L <= 2M  (root of unity: 2 has order 2M)
+  //   2) 2 * piece_bits + k <= M  (convolution coefficients don't wrap)
+  //   3) L * piece_limbs >= n + m  (enough room for the result)
+  // Pick the (k, M) pair that minimizes M * L (total work ~ L*log(L)*M/32).
+  size_t total_limbs = n + m;
+  size_t best_k = 0, best_M = 0, best_piece_limbs = 0;
+  size_t best_cost = SIZE_MAX;
+
+  for (size_t k = 4; k <= 24; ++k) {
+    size_t L = size_t(1) << k;
+    size_t piece_limbs = (total_limbs + L - 1) / L;
+    if (piece_limbs == 0) piece_limbs = 1;
+    size_t piece_bits = piece_limbs * 32;
+    size_t M_needed = 2 * piece_bits + k + 1;
+    // Round up to multiple of 32.
+    M_needed = ((M_needed + 31) / 32) * 32;
+    if (M_needed < 64) M_needed = 64;
+
+    // Root of unity constraint: L <= 2M and L must divide 2M exactly
+    // (so that twiddle_step = 2M/L is an integer).
+    if (L > 2 * M_needed) {
+      M_needed = ((L + 31) / 32) * 32;
+    }
+    while ((2 * M_needed) % L != 0) {
+      M_needed += 32;
+    }
+
+    // Verify coefficient constraint still holds after adjusting M.
+    if (2 * piece_bits + k <= M_needed && L <= 2 * M_needed) {
+      // Cost ~ L pointwise muls of (M/32)-limb values ~ L * (M/32)^2.
+      size_t m_limbs = M_needed / 32;
+      size_t cost = L * m_limbs * m_limbs;
+      if (cost < best_cost) {
+        best_cost = cost;
+        best_k = k;
+        best_M = M_needed;
+        best_piece_limbs = piece_limbs;
+      }
+    }
+  }
+
+  size_t k = best_k;
+  size_t L = size_t(1) << k;
+  size_t M = best_M;
+  size_t piece_limbs = best_piece_limbs;
+  size_t elem_limbs = M / 32 + 1;
+
+  // === Allocate buffers ===
+  std::vector<uint32_t> buf_a(L * elem_limbs, 0);
+  std::vector<uint32_t> buf_b(L * elem_limbs, 0);
+
+  // === Split inputs into L pieces of piece_limbs limbs each ===
+  for (size_t i = 0; i < L; ++i) {
+    auto* dst = buf_a.data() + i * elem_limbs;
+    size_t src_start = i * piece_limbs;
+    size_t src_count = (src_start < n) ? std::min(piece_limbs, n - src_start) : 0;
+    for (size_t j = 0; j < src_count; ++j) dst[j] = digits[src_start + j];
+  }
+  for (size_t i = 0; i < L; ++i) {
+    auto* dst = buf_b.data() + i * elem_limbs;
+    size_t src_start = i * piece_limbs;
+    size_t src_count = (src_start < m) ? std::min(piece_limbs, m - src_start) : 0;
+    for (size_t j = 0; j < src_count; ++j) dst[j] = other.digits[src_start + j];
+  }
+
+  // === Forward FNT on both arrays ===
+  detail::fnt(std::span<uint32_t>(buf_a), elem_limbs, L, false);
+  detail::fnt(std::span<uint32_t>(buf_b), elem_limbs, L, false);
+
+  // === Pointwise multiply ===
+  std::vector<uint32_t> mul_scratch(2 * (M / 32), 0);
+  for (size_t i = 0; i < L; ++i) {
+    detail::FermatElem a{std::span<uint32_t>(buf_a.data() + i * elem_limbs, elem_limbs)};
+    detail::FermatElem b{std::span<uint32_t>(buf_b.data() + i * elem_limbs, elem_limbs)};
+    detail::fermat_mul(a, a, b, std::span<uint32_t>(mul_scratch));
+  }
+
+  // === Inverse FNT ===
+  detail::fnt(std::span<uint32_t>(buf_a), elem_limbs, L, true);
+
+  // === Carry propagation ===
+  // Each inverse-FNT coefficient c_i (up to M bits = elem_limbs limbs) is placed
+  // at limb offset i * piece_limbs.  Coefficients overlap, so add_to propagates
+  // carry through the full output.
+  digits.assign(total_limbs, 0);
+  for (size_t i = 0; i < L; ++i) {
+    size_t dst_start = i * piece_limbs;
+    if (dst_start >= total_limbs) break;
+
+    auto piece = std::span<const uint32_t>(buf_a.data() + i * elem_limbs, elem_limbs);
+    auto dst = std::span<uint32_t>(digits).subspan(dst_start);
+    detail::add_to(dst, piece);
+  }
+
+  is_negative = result_neg;
+  trim();
+  return *this;
 }
 
 BigInt& BigInt::div_naive(const BigInt&) {

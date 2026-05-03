@@ -2,9 +2,25 @@
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <vector>
+
 using BigInt = fraction::BigInt;
 
 static BigInt H(const std::string& s) { return BigInt::from_hex_string(s); }
+
+static std::vector<uint32_t> F32(uint64_t value) {
+  return {static_cast<uint32_t>(value),
+          static_cast<uint32_t>(value >> 32)};
+}
+
+static uint64_t F32Value(const std::vector<uint32_t>& limbs) {
+  return uint64_t(limbs[0]) | (uint64_t(limbs[1]) << 32);
+}
+
+static fraction::detail::FermatElem FE(std::vector<uint32_t>& limbs) {
+  return fraction::detail::FermatElem{std::span<uint32_t>(limbs)};
+}
 
 // ============================================================
 // Construction
@@ -295,6 +311,81 @@ TEST(BigIntEdge, LargeAddition) {
   BigInt a = H("ffffffffffffffff");
   a += BigInt(1);
   EXPECT_EQ(a.to_hex_string(), "000000010000000000000000");
+}
+
+// ============================================================
+// Fermat residue helpers for SSA
+// ============================================================
+
+TEST(FermatElem, AddReachesTwoPowerM) {
+  auto a = F32(0xffffffffULL);
+  auto b = F32(1);
+  auto out = F32(0);
+
+  fraction::detail::fermat_add(FE(out), FE(a), FE(b));
+
+  EXPECT_EQ(F32Value(out), 0x100000000ULL);
+}
+
+TEST(FermatElem, AddReducesModulusToZero) {
+  auto a = F32(0x100000000ULL);
+  auto b = F32(1);
+  auto out = F32(0);
+
+  fraction::detail::fermat_add(FE(out), FE(a), FE(b));
+
+  EXPECT_EQ(F32Value(out), 0ULL);
+}
+
+TEST(FermatElem, SubBorrowWrapsToModulusMinusOne) {
+  auto a = F32(0);
+  auto b = F32(1);
+  auto out = F32(0);
+
+  fraction::detail::fermat_sub(FE(out), FE(a), FE(b));
+
+  EXPECT_EQ(F32Value(out), 0x100000000ULL);
+}
+
+TEST(FermatElem, SubFromTwoPowerM) {
+  auto a = F32(0x100000000ULL);
+  auto b = F32(1);
+  auto out = F32(0);
+
+  fraction::detail::fermat_sub(FE(out), FE(a), FE(b));
+
+  EXPECT_EQ(F32Value(out), 0xffffffffULL);
+}
+
+TEST(FermatElem, MulPow2CrossesMBitBoundary) {
+  auto x = F32(1);
+  auto out = F32(0);
+
+  fraction::detail::fermat_mul_pow2(FE(out), FE(x), 32);
+  EXPECT_EQ(F32Value(out), 0x100000000ULL);
+
+  fraction::detail::fermat_mul_pow2(FE(out), FE(x), 33);
+  EXPECT_EQ(F32Value(out), 0xffffffffULL);
+}
+
+TEST(FermatElem, MulPow2UsesPeriodTwoM) {
+  auto x = F32(0x12345678ULL);
+  auto out = F32(0);
+
+  fraction::detail::fermat_mul_pow2(FE(out), FE(x), 64);
+
+  EXPECT_EQ(F32Value(out), F32Value(x));
+}
+
+TEST(FermatElem, ButterflyUsesPow2Twiddle) {
+  auto a = F32(3);
+  auto b = F32(5);
+  auto scratch = F32(0);
+
+  fraction::detail::fermat_butterfly(FE(a), FE(b), 1, FE(scratch));
+
+  EXPECT_EQ(F32Value(a), 13ULL);
+  EXPECT_EQ(F32Value(b), 0xfffffffaULL);
 }
 
 // ============================================================
@@ -658,3 +749,215 @@ TEST_P(KaratsubaSizeTest, AllMaxVsNaive) {
 }
 INSTANTIATE_TEST_SUITE_P(Sizes, KaratsubaSizeTest,
                           ::testing::Values(64, 96, 128, 160, 192, 256, 320, 384, 448, 512));
+
+// ============================================================
+// SSA multiplication
+// ============================================================
+
+TEST(BigIntSSA, SmallSameAsNaive) {
+  BigInt a(42);
+  a.multiply_inplace(BigInt(7), fraction::MulAlgo::SSA);
+  EXPECT_EQ(a, BigInt(294));
+}
+
+TEST(BigIntSSA, ZeroTimesValue) {
+  BigInt a(0);
+  a.multiply_inplace(BigInt(12345), fraction::MulAlgo::SSA);
+  EXPECT_EQ(a, BigInt(0));
+}
+
+TEST(BigIntSSA, ValueTimesZero) {
+  BigInt a(12345);
+  a.multiply_inplace(BigInt(0), fraction::MulAlgo::SSA);
+  EXPECT_EQ(a, BigInt(0));
+}
+
+TEST(BigIntSSA, NegativeResult) {
+  BigInt a(-3);
+  BigInt b(5);
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::SSA);
+  EXPECT_EQ(result, expected);
+}
+
+TEST(BigIntSSA, NegativeTimesNegative) {
+  BigInt a(-3);
+  BigInt b(-5);
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::SSA);
+  EXPECT_EQ(result, expected);
+}
+
+TEST(BigIntSSA, SelfMultiplication) {
+  BigInt a = H("ffffffffffffffff");
+  BigInt expected = a;
+  expected.multiply_inplace(expected, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(result, fraction::MulAlgo::SSA);
+  EXPECT_EQ(result, expected);
+}
+
+TEST(BigIntSSA, MediumProductSameAsNaive) {
+  // 64-limb × 64-limb
+  std::string sa, sb;
+  for (int i = 0; i < 64; ++i) {
+    sa += "ffffffff";
+    sb += "12345678";
+  }
+  BigInt a = H(sa);
+  BigInt b = H(sb);
+
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::SSA);
+  EXPECT_EQ(result.to_hex_string(), expected.to_hex_string());
+}
+
+TEST(BigIntSSA, LargeProduct1024Limbs) {
+  // 1024-limb × 1024-limb — first size tier that actually triggers SSA
+  std::string sa, sb;
+  for (int i = 0; i < 1024; ++i) {
+    sa += "ffffffff";
+    sb += "deadbeef";
+  }
+  BigInt a = H(sa);
+  BigInt b = H(sb);
+
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Karatsuba);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::SSA);
+  EXPECT_EQ(result, expected);
+}
+
+TEST(BigIntSSA, ModerateSizedProduct) {
+  // 200-limb × 200-limb: large enough to exercise the transform.
+  std::string sa, sb;
+  for (int i = 0; i < 200; ++i) {
+    sa += "ffffffff";
+    sb += "12345678";
+  }
+  BigInt a = H(sa);
+  BigInt b = H(sb);
+
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Naive);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::SSA);
+  EXPECT_EQ(result.to_hex_string(), expected.to_hex_string());
+}
+
+TEST(BigIntSSA, AsymmetricSizes) {
+  // 1500-limb × 800-limb
+  std::string sa, sb;
+  for (int i = 0; i < 1500; ++i) sa += "cafef00d";
+  for (int i = 0; i < 800; ++i) sb += "baddcafe";
+
+  BigInt a = H(sa);
+  BigInt b = H(sb);
+
+  BigInt expected = a;
+  expected.multiply_inplace(b, fraction::MulAlgo::Karatsuba);
+
+  BigInt result = a;
+  result.multiply_inplace(b, fraction::MulAlgo::SSA);
+  EXPECT_EQ(result, expected);
+}
+
+TEST(FermatElem, FNTRoundTrip) {
+  // 4-element FNT with M=64, elem_limbs=3 (2 value limbs + 1 carry).
+  size_t L = 4, elem_limbs = 3;
+  std::vector<uint32_t> buf(L * elem_limbs, 0);
+
+  // Initialize: [3, 0, 0], [5, 0, 0], [7, 0, 0], [2, 0, 0]
+  buf[0] = 3; buf[3] = 5; buf[6] = 7; buf[9] = 2;
+
+  auto orig = buf;  // save copy
+
+  // Forward FNT, then inverse — should get back the original.
+  fraction::detail::fnt(std::span<uint32_t>(buf), elem_limbs, L, false);
+  fraction::detail::fnt(std::span<uint32_t>(buf), elem_limbs, L, true);
+
+  for (size_t i = 0; i < buf.size(); ++i) {
+    EXPECT_EQ(buf[i], orig[i]) << "mismatch at limb " << i;
+  }
+}
+
+TEST(FermatElem, FNTConvolution) {
+  // 4-element FNT with M=64, elem_limbs=3.
+  // Convolve a=[1,2,0,0] and b=[3,4,0,0].
+  // Expected convolution: [3, 10, 8, 0] (indices 0..3).
+  size_t L = 4, elem_limbs = 3;
+  std::vector<uint32_t> buf_a(L * elem_limbs, 0);
+  std::vector<uint32_t> buf_b(L * elem_limbs, 0);
+
+  buf_a[0] = 1; buf_a[3] = 2;  // a = [1, 2, 0, 0]
+  buf_b[0] = 3; buf_b[3] = 4;  // b = [3, 4, 0, 0]
+
+  fraction::detail::fnt(std::span<uint32_t>(buf_a), elem_limbs, L, false);
+  fraction::detail::fnt(std::span<uint32_t>(buf_b), elem_limbs, L, false);
+
+  // Pointwise multiply
+  std::vector<uint32_t> scratch(4, 0);
+  for (size_t i = 0; i < L; ++i) {
+    auto a = fraction::detail::FermatElem{
+        std::span<uint32_t>(buf_a.data() + i * elem_limbs, elem_limbs)};
+    auto b = fraction::detail::FermatElem{
+        std::span<uint32_t>(buf_b.data() + i * elem_limbs, elem_limbs)};
+    fraction::detail::fermat_mul(a, a, b, std::span<uint32_t>(scratch));
+  }
+
+  // Inverse FNT
+  fraction::detail::fnt(std::span<uint32_t>(buf_a), elem_limbs, L, true);
+
+  EXPECT_EQ(buf_a[0], 3u);   // c[0] = 3
+  EXPECT_EQ(buf_a[3], 10u);  // c[1] = 10
+  EXPECT_EQ(buf_a[6], 8u);   // c[2] = 8
+  EXPECT_EQ(buf_a[9], 0u);   // c[3] = 0
+}
+
+TEST(FermatElem, FNT8Convolution) {
+  // 8-element FNT with M=96, elem_limbs=4 (3 value limbs + 1 carry).
+  // a = [1, 2, 3, 4, 0, 0, 0, 0], b = [5, 6, 7, 8, 0, 0, 0, 0]
+  // Expected: c[0]=5, c[1]=16, c[2]=34, c[3]=60, c[4]=61, c[5]=52, c[6]=32, c[7]=0
+  size_t L = 8, elem_limbs = 4;
+  std::vector<uint32_t> buf_a(L * elem_limbs, 0);
+  std::vector<uint32_t> buf_b(L * elem_limbs, 0);
+
+  buf_a[0] = 1; buf_a[4] = 2; buf_a[8] = 3; buf_a[12] = 4;
+  buf_b[0] = 5; buf_b[4] = 6; buf_b[8] = 7; buf_b[12] = 8;
+
+  fraction::detail::fnt(std::span<uint32_t>(buf_a), elem_limbs, L, false);
+  fraction::detail::fnt(std::span<uint32_t>(buf_b), elem_limbs, L, false);
+
+  std::vector<uint32_t> scratch(6, 0);  // 2 * (M/32) = 2 * 3
+  for (size_t i = 0; i < L; ++i) {
+    auto a = fraction::detail::FermatElem{
+        std::span<uint32_t>(buf_a.data() + i * elem_limbs, elem_limbs)};
+    auto b = fraction::detail::FermatElem{
+        std::span<uint32_t>(buf_b.data() + i * elem_limbs, elem_limbs)};
+    fraction::detail::fermat_mul(a, a, b, std::span<uint32_t>(scratch));
+  }
+
+  fraction::detail::fnt(std::span<uint32_t>(buf_a), elem_limbs, L, true);
+
+  EXPECT_EQ(buf_a[0], 5u);    // c[0]
+  EXPECT_EQ(buf_a[4], 16u);   // c[1]
+  EXPECT_EQ(buf_a[8], 34u);   // c[2]
+  EXPECT_EQ(buf_a[12], 60u);  // c[3]
+  EXPECT_EQ(buf_a[16], 61u);  // c[4]
+  EXPECT_EQ(buf_a[20], 52u);  // c[5]
+  EXPECT_EQ(buf_a[24], 32u);  // c[6]
+  EXPECT_EQ(buf_a[28], 0u);   // c[7]
+}

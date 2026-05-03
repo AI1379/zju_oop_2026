@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -328,6 +329,28 @@ class BigInt {
   BigInt& div_newton(const BigInt& other);
   BigInt& div_burnikel_ziegler(const BigInt& other);
 };
+
+// Expose detail types for testing.
+namespace detail {
+struct FermatElem {
+  std::span<uint32_t> limbs;
+  size_t value_limbs() const { return limbs.size() - 1; }
+  size_t modulus_bits() const { return value_limbs() * 32; }
+};
+
+void fermat_zero(FermatElem x);
+void fermat_copy(FermatElem dst, FermatElem src);
+void fermat_normalize(FermatElem x);
+void fermat_add(FermatElem out, FermatElem a, FermatElem b);
+void fermat_sub(FermatElem out, FermatElem a, FermatElem b);
+void fermat_mul_pow2(FermatElem out, FermatElem in, size_t shift_bits);
+void fermat_butterfly(FermatElem a, FermatElem b, size_t twiddle_shift,
+                      FermatElem scratch);
+void fermat_mul(FermatElem out, FermatElem a, FermatElem b,
+                std::span<uint32_t> scratch);
+void fnt(std::span<uint32_t> buffer, size_t elem_limbs, size_t transform_len,
+         bool inverse);
+}  // namespace detail
 
 }  // namespace fraction
 
