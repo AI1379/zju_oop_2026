@@ -19,7 +19,6 @@ template <typename T>
   requires Integral<T>
 class Fraction {
  public:
-  // Default constructors and assignment operators
   Fraction() = default;
   Fraction(const Fraction&) = default;
   Fraction& operator=(const Fraction&) = default;
@@ -48,10 +47,29 @@ class Fraction {
     }
   }
 
+  explicit operator double() const
+    requires BuiltinIntegral<T>
+  {
+    return static_cast<double>(numerator_) / static_cast<double>(denominator_);
+  }
+
+  // ---- Stream I/O ----
+
   friend std::ostream& operator<<(std::ostream& os, const Fraction& fraction) {
     os << fraction.to_string();
     return os;
   }
+
+  friend std::istream& operator>>(std::istream& is, Fraction& fraction)
+    requires BuiltinIntegral<T>
+  {
+    char slash;
+    is >> fraction.numerator_ >> slash >> fraction.denominator_;
+    if (fraction.denominator_ == 0) is.setstate(std::ios::failbit);
+    return is;
+  }
+
+  // ---- Comparison ----
 
   friend auto operator==(const Fraction& lhs, const Fraction& rhs) {
     return (lhs.numerator_ * rhs.denominator_) ==
@@ -63,62 +81,38 @@ class Fraction {
            (rhs.numerator_ * lhs.denominator_);
   }
 
- private:
-  T numerator_{};
-  T denominator_{1};
-};
+  // ---- Arithmetic ----
 
-template <typename T>
-  requires BuiltinIntegral<T>
-class Fraction<T> {
- public:
-  // Default constructors and assignment operators
-  Fraction() = default;
-  Fraction(const Fraction&) = default;
-  Fraction& operator=(const Fraction&) = default;
-  Fraction(Fraction&&) = default;
-  Fraction& operator=(Fraction&&) = default;
+  friend Fraction operator+(const Fraction& lhs, const Fraction& rhs) {
+    return Fraction(lhs.numerator_ * rhs.denominator_ +
+                        rhs.numerator_ * lhs.denominator_,
+                    lhs.denominator_ * rhs.denominator_);
+  }
 
-  Fraction(T numerator, T denominator) {
-    if (denominator == 0) {
-      throw std::invalid_argument("Denominator cannot be zero");
+  friend Fraction operator-(const Fraction& lhs, const Fraction& rhs) {
+    return Fraction(lhs.numerator_ * rhs.denominator_ -
+                        rhs.numerator_ * lhs.denominator_,
+                    lhs.denominator_ * rhs.denominator_);
+  }
+
+  friend Fraction operator*(const Fraction& lhs, const Fraction& rhs) {
+    return Fraction(lhs.numerator_ * rhs.numerator_,
+                    lhs.denominator_ * rhs.denominator_);
+  }
+
+  friend Fraction operator/(const Fraction& lhs, const Fraction& rhs) {
+    if (rhs.numerator_ == T{}) {
+      throw std::invalid_argument("Division by zero");
     }
-    if (denominator < 0) {
-      numerator = -numerator;
-      denominator = -denominator;
-    }
-    numerator_ = numerator;
-    denominator_ = denominator;
+    return Fraction(lhs.numerator_ * rhs.denominator_,
+                    lhs.denominator_ * rhs.numerator_);
   }
 
-  std::string to_string() const {
-    return std::to_string(numerator_) + "/" + std::to_string(denominator_);
-  }
+  // ---- Built-in only utilities ----
 
-  friend std::ostream& operator<<(std::ostream& os, const Fraction& fraction) {
-    os << fraction.to_string();
-    return os;
-  }
-
-  friend bool operator==(const Fraction& lhs, const Fraction& rhs) {
-    return lhs.numerator_ * rhs.denominator_ ==
-           rhs.numerator_ * lhs.denominator_;
-  }
-
-  friend std::strong_ordering operator<=>(const Fraction& lhs,
-                                          const Fraction& rhs) {
-    return lhs.numerator_ * rhs.denominator_ <=>
-           rhs.numerator_ * lhs.denominator_;
-  }
-
-  friend std::istream& operator>>(std::istream& is, Fraction& fraction) {
-    char slash;
-    is >> fraction.numerator_ >> slash >> fraction.denominator_;
-    if (fraction.denominator_ == 0) is.setstate(std::ios::failbit);
-    return is;
-  }
-
-  static Fraction parse(const std::string& str) {
+  static Fraction parse(const std::string& str)
+    requires BuiltinIntegral<T>
+  {
     size_t slash_pos = str.find('/');
     size_t dot_pos = str.find('.');
     bool valid =
@@ -157,7 +151,9 @@ class Fraction<T> {
     }
   }
 
-  void reduce() {
+  void reduce()
+    requires BuiltinIntegral<T>
+  {
     T g = gcd(numerator_, denominator_);
     numerator_ /= g;
     denominator_ /= g;

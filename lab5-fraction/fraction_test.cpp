@@ -289,3 +289,79 @@ TEST(FractionParseInvalid, MultipleDots) {
 TEST(FractionParseInvalid, SlashAndDotSameString) {
   EXPECT_THROW(FractionI::parse("1.2/3"), std::invalid_argument);
 }
+
+// ============================================================
+// Arithmetic
+// ============================================================
+
+TEST(FractionArithmetic, Addition) {
+  EXPECT_EQ(FractionI(1, 2) + FractionI(1, 3), FractionI(5, 6));
+}
+
+TEST(FractionArithmetic, Subtraction) {
+  EXPECT_EQ(FractionI(1, 2) - FractionI(1, 3), FractionI(1, 6));
+}
+
+TEST(FractionArithmetic, Multiplication) {
+  EXPECT_EQ(FractionI(2, 3) * FractionI(3, 4), FractionI(6, 12));
+}
+
+TEST(FractionArithmetic, Division) {
+  EXPECT_EQ(FractionI(1, 2) / FractionI(2, 3), FractionI(3, 4));
+}
+
+TEST(FractionArithmetic, DivisionByZeroThrows) {
+  EXPECT_THROW(FractionI(1, 2) / FractionI(0, 1), std::invalid_argument);
+}
+
+TEST(FractionArithmetic, AddNegative) {
+  EXPECT_EQ(FractionI(1, 2) + FractionI(-1, 3), FractionI(1, 6));
+}
+
+TEST(FractionArithmetic, SubtractNegative) {
+  EXPECT_EQ(FractionI(1, 2) - FractionI(-1, 3), FractionI(5, 6));
+}
+
+TEST(FractionArithmetic, MultiplyNegative) {
+  EXPECT_EQ(FractionI(-1, 2) * FractionI(2, 3), FractionI(-2, 6));
+}
+
+TEST(FractionArithmetic, DivideNegative) {
+  EXPECT_EQ(FractionI(-1, 2) / FractionI(2, 3), FractionI(-3, 4));
+}
+
+TEST(FractionArithmetic, SelfAddition) {
+  FractionI f(1, 2);
+  // 1/2 + 1/2 = (1*2 + 1*2)/(2*2) = 4/4 == 1/1
+  EXPECT_EQ(f + f, FractionI(1, 1));
+}
+
+TEST(FractionArithmetic, ZeroOperand) {
+  EXPECT_EQ(FractionI(0, 1) + FractionI(1, 2), FractionI(1, 2));
+  EXPECT_EQ(FractionI(1, 2) - FractionI(1, 2), FractionI(0, 4));
+  EXPECT_EQ(FractionI(5, 7) * FractionI(0, 1), FractionI(0, 7));
+}
+
+// ============================================================
+// Double conversion
+// ============================================================
+
+TEST(FractionDouble, OneHalf) {
+  EXPECT_DOUBLE_EQ(static_cast<double>(FractionI(1, 2)), 0.5);
+}
+
+TEST(FractionDouble, Zero) {
+  EXPECT_DOUBLE_EQ(static_cast<double>(FractionI(0, 1)), 0.0);
+}
+
+TEST(FractionDouble, Negative) {
+  EXPECT_DOUBLE_EQ(static_cast<double>(FractionI(-1, 2)), -0.5);
+}
+
+TEST(FractionDouble, OneThird) {
+  EXPECT_NEAR(static_cast<double>(FractionI(1, 3)), 1.0 / 3.0, 1e-15);
+}
+
+TEST(FractionDouble, WholeNumber) {
+  EXPECT_DOUBLE_EQ(static_cast<double>(FractionI(3, 1)), 3.0);
+}
