@@ -176,6 +176,15 @@ class BigInt {
     return *this - (this->divide(other, algo) * other);
   }
 
+  // Returns {quotient, remainder}
+  std::pair<BigInt, BigInt> div_mod(const BigInt& other,
+                                    DivAlgo algo = DivAlgo::Auto) const {
+    BigInt quotient = *this;
+    quotient.divide_inplace(other, algo);
+    BigInt remainder = *this - quotient * other;
+    return {std::move(quotient), std::move(remainder)};
+  }
+
   // Comparison operators
   friend bool operator==(const BigInt& lhs, const BigInt& rhs) {
     if (lhs.is_negative != rhs.is_negative) {
@@ -288,6 +297,15 @@ class BigInt {
   // Get the number of digits (in base 2^32)
   size_t size() const { return digits.size(); }
 
+  // Convert to uint64_t (valid only when value fits)
+  uint64_t to_uint64() const {
+    uint64_t val = 0;
+    for (size_t i = digits.size(); i-- > 0;) {
+      val = (val << 32) | digits[i];
+    }
+    return val;
+  }
+
   // Trim leading zeros
   void trim() {
     while (!digits.empty() && digits.back() == 0) {
@@ -328,6 +346,10 @@ class BigInt {
   BigInt& div_naive(const BigInt& other);
   BigInt& div_newton(const BigInt& other);
   BigInt& div_burnikel_ziegler(const BigInt& other);
+
+  // Newton-Raphson reciprocal: compute floor(B^target_prec / d).
+  // d must be positive and normalized (leading limb has bit 31 set).
+  static BigInt compute_reciprocal(const BigInt& d, size_t target_prec);
 };
 
 // Expose detail types for testing.

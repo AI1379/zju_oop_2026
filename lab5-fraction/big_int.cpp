@@ -634,6 +634,39 @@ void fnt(std::span<uint32_t> buffer, size_t elem_limbs, size_t transform_len,
   }
 }
 
+// Count leading zeros of a 32-bit integer.
+int clz32(uint32_t x) {
+  if (x == 0) return 32;
+#if FRACTION_COMPILER_MSVC
+  unsigned long index;
+  _BitScanReverse(&index, x);
+  return 31 - static_cast<int>(index);
+#elif FRACTION_COMPILER_CLANG || FRACTION_COMPILER_GCC
+  return __builtin_clz(x);
+#else
+  int n = 0;
+  if (x <= 0x0000FFFF) { n += 16; x <<= 16; }
+  if (x <= 0x00FFFFFF) { n += 8; x <<= 8; }
+  if (x <= 0x0FFFFFFF) { n += 4; x <<= 4; }
+  if (x <= 0x3FFFFFFF) { n += 2; x <<= 2; }
+  if (x <= 0x7FFFFFFF) { n += 1; }
+  return n;
+#endif
+}
+
+// Left-shift a digit vector by 'bits' bits (0 <= bits < 32).
+// Analogous to add_to / sub_from — operates on raw limb storage.
+void shift_left_small(std::vector<uint32_t>& digits, int bits) {
+  if (bits == 0 || digits.empty()) return;
+  uint32_t carry = 0;
+  for (auto& d : digits) {
+    uint64_t val = (static_cast<uint64_t>(d) << bits) | carry;
+    d = static_cast<uint32_t>(val);
+    carry = static_cast<uint32_t>(val >> 32);
+  }
+  if (carry) digits.push_back(carry);
+}
+
 }  // namespace detail
 
 void BigInt::add_abs(const BigInt& other) {
@@ -943,16 +976,412 @@ BigInt& BigInt::mul_ssa(const BigInt& other) {
   return *this;
 }
 
-BigInt& BigInt::div_naive(const BigInt&) {
-  throw std::runtime_error("Naive division not implemented");
+BigInt& BigInt::divide_inplace(const BigInt& other, DivAlgo algo) {
+  switch (algo) {
+    case DivAlgo::Auto:
+    case DivAlgo::Naive:
+      return div_naive(other);
+    case DivAlgo::Newton:
+      return div_newton(other);
+    case DivAlgo::Burnikel_Ziegler:
+      return div_burnikel_ziegler(other);
+  }
+  return *this;
 }
 
-BigInt& BigInt::div_newton(const BigInt&) {
-  throw std::runtime_error("Newton division not implemented");
+BigInt& BigInt::div_naive(const BigInt& other) {
+  if (other.digits.empty() || (other.digits.size() == 1 && other.digits[0] == 0)) {
+    throw std::invalid_argument("Division by zero");
+  }
+
+  bool result_neg = (is_negative != other.is_negative);
+
+  BigInt divisor = other;
+  divisor.is_negative = false;
+  BigInt dividend = std::move(*this);
+  dividend.is_negative = false;
+
+  if (abs_compare(dividend, divisor) < 0) {
+    *this = BigInt(0);
+    is_negative = false;
+    return *this;
+  }
+
+  // Knuth's Algorithm D: normalize so leading digit of divisor >= BASE/2
+  uint32_t d_norm = static_cast<uint32_t>(
+      (UINT64_C(1) << 32) / (static_cast<uint64_t>(divisor.digits.back()) + 1));
+
+  auto mul_limb = [](std::vector<uint32_t>& v, uint32_t limb) {
+    uint64_t carry = 0;
+    for (auto& x : v) {
+      uint64_t p = static_cast<uint64_t>(x) * limb + carry;
+      x = static_cast<uint32_t>(p);
+      carry = p >> 32;
+    }
+    if (carry) v.push_back(static_cast<uint32_t>(carry));
+  };
+
+  mul_limb(dividend.digits, d_norm);
+  mul_limb(divisor.digits, d_norm);
+
+  size_t n = divisor.digits.size();
+  size_t q_size = dividend.digits.size() - n + 1;
+
+  // Pad with one zero at the top so dividend[j+n] is always valid
+  dividend.digits.push_back(0);
+
+  std::vector<uint32_t> q_digits(q_size, 0);
+
+  for (size_t j = q_size; j-- > 0;) {
+    uint64_t hi2 = (static_cast<uint64_t>(dividend.digits[j + n]) << 32) |
+                   dividend.digits[j + n - 1];
+    uint64_t q_hat = hi2 / divisor.digits[n - 1];
+    uint64_t r_hat = hi2 % divisor.digits[n - 1];
+
+    // Refine estimate (only when divisor has >= 2 limbs)
+    if (n >= 2) {
+      while (q_hat >= (UINT64_C(1) << 32) ||
+             q_hat * divisor.digits[n - 2] >
+                 ((r_hat << 32) | dividend.digits[j + n - 2])) {
+        --q_hat;
+        r_hat += divisor.digits[n - 1];
+        if (r_hat >= (UINT64_C(1) << 32)) break;
+      }
+    } else if (q_hat >= (UINT64_C(1) << 32)) {
+      q_hat = 0xFFFFFFFF;
+    }
+
+    // Multiply and subtract: dividend[j..j+n] -= q_hat * divisor
+    int64_t borrow = 0;
+    for (size_t i = 0; i < n; ++i) {
+      uint64_t prod = q_hat * divisor.digits[i];
+      int64_t diff = static_cast<int64_t>(dividend.digits[j + i]) -
+                     static_cast<int64_t>(static_cast<uint32_t>(prod)) - borrow;
+      dividend.digits[j + i] = static_cast<uint32_t>(diff);
+      borrow = static_cast<int64_t>(prod >> 32) - (diff >> 32);
+    }
+    int64_t diff = static_cast<int64_t>(dividend.digits[j + n]) - borrow;
+    dividend.digits[j + n] = static_cast<uint32_t>(diff);
+
+    q_digits[j] = static_cast<uint32_t>(q_hat);
+
+    if (diff < 0) {
+      --q_digits[j];
+      uint64_t carry = 0;
+      for (size_t i = 0; i < n; ++i) {
+        uint64_t s = static_cast<uint64_t>(dividend.digits[j + i]) +
+                     divisor.digits[i] + carry;
+        dividend.digits[j + i] = static_cast<uint32_t>(s);
+        carry = s >> 32;
+      }
+      dividend.digits[j + n] += static_cast<uint32_t>(carry);
+    }
+  }
+
+  digits = std::move(q_digits);
+  is_negative = result_neg;
+  trim();
+  return *this;
+}
+
+// ============================================================
+// Newton-Raphson division
+// ============================================================
+
+// Compute floor(B^target_prec / d) using Newton iteration.
+//
+// Newton's method for 1/d: x_{k+1} = x_k * (2 - d * x_k).
+// In fixed-point integer arithmetic with scale B^p_k:
+//   R_{k+1} = R_k * (2 * B^{p_k} - d * R_k)
+// Each iteration doubles precision: p_{k+1} = 2 * p_k.
+//
+// Base case uses Knuth's Algorithm D (div_naive).
+// Total cost: O(M(target_prec)) dominated by the last multiplication.
+BigInt BigInt::compute_reciprocal(const BigInt& d, size_t target_prec) {
+  static constexpr size_t kBaseCaseThreshold = 64;
+  size_t n = d.size();
+
+  // Base case: compute B^target_prec / d directly.
+  if (target_prec <= kBaseCaseThreshold || target_prec <= n + 1) {
+    BigInt numerator;
+    numerator.digits.assign(target_prec, 0);
+    numerator.digits.push_back(1);  // B^target_prec
+    numerator.is_negative = false;
+    auto [q, r] = numerator.div_mod(d, DivAlgo::Naive);
+    return q;
+  }
+
+  // Recursive Newton step: compute at half precision, then double.
+  size_t half_prec = (target_prec + 1) / 2;
+  BigInt r = compute_reciprocal(d, half_prec);
+  // r ≈ B^{half_prec} / d  (underestimate via floor)
+
+  // Newton: R_new = r * (2 * B^{half_prec} - d * r)
+  BigInt dr = d * r;
+
+  // Construct 2 * B^{half_prec}: digit 2 at limb position half_prec
+  BigInt two_Bh;
+  two_Bh.digits.assign(half_prec + 1, 0);
+  two_Bh.digits[half_prec] = 2;
+  two_Bh.is_negative = false;
+
+  // Since r = floor(B^{half_prec}/d), we have d*r <= B^{half_prec},
+  // so corr = 2*B^{half_prec} - d*r >= B^{half_prec} > 0.
+  BigInt corr = two_Bh - dr;
+
+  // R_new = r * corr ≈ (B^{half_prec}/d) * B^{half_prec} = B^{2*half_prec}/d
+  BigInt R_new = r * corr;
+
+  return R_new;
+}
+
+BigInt& BigInt::div_newton(const BigInt& other) {
+  if (other.digits.empty() ||
+      (other.digits.size() == 1 && other.digits[0] == 0)) {
+    throw std::invalid_argument("Division by zero");
+  }
+
+  bool result_neg = (is_negative != other.is_negative);
+
+  BigInt divisor = other;
+  divisor.is_negative = false;
+  BigInt dividend = *this;
+  dividend.is_negative = false;
+
+  if (abs_compare(dividend, divisor) < 0) {
+    *this = BigInt(0);
+    return *this;
+  }
+
+  size_t n = divisor.size();
+
+  // For small divisors, Knuth's Algorithm D is faster (less overhead).
+  if (n <= 64) {
+    return div_naive(other);
+  }
+
+  // Normalize: shift divisor so its leading limb has bit 31 set.
+  // Apply the same shift to the dividend — the quotient is unchanged.
+  int shift = detail::clz32(divisor.digits.back());
+  if (shift > 0) {
+    detail::shift_left_small(divisor.digits, shift);
+    detail::shift_left_small(dividend.digits, shift);
+  }
+
+  // Compute reciprocal R = floor(B^{m+1} / divisor)
+  // where m = dividend size in limbs.
+  size_t m = dividend.size();
+  size_t prec = m + 1;
+  BigInt R = compute_reciprocal(divisor, prec);
+
+  // q = floor(dividend * R / B^prec)
+  // This is just the upper limbs of the product.
+  BigInt aR = dividend * R;
+
+  if (aR.size() > prec) {
+    digits.assign(aR.digits.begin() + prec, aR.digits.end());
+  } else {
+    digits.clear();
+  }
+  is_negative = result_neg;
+  trim();
+
+  if (digits.empty()) {
+    *this = BigInt(0);
+    return *this;
+  }
+
+  // Newton's method may be off by at most 1. Adjust.
+  BigInt one(1);
+  BigInt test = (*this + one) * divisor;
+  if (test <= dividend) {
+    *this += one;
+  }
+  // Safety: also check for overestimate
+  test = *this * divisor;
+  while (test > dividend) {
+    *this -= one;
+    test = *this * divisor;
+  }
+
+  return *this;
 }
 
 BigInt& BigInt::div_burnikel_ziegler(const BigInt&) {
   throw std::runtime_error("Burnikel-Ziegler division not implemented");
+}
+
+// ============================================================
+// Divide-and-conquer decimal conversion
+// ============================================================
+
+namespace {
+
+// Convert a non-negative BigInt that fits in uint64_t to a decimal string,
+// zero-padded to exactly `width` digits.
+std::string small_to_dec_padded(uint64_t val, int width) {
+  std::string s(width, '0');
+  for (int i = width - 1; i >= 0 && val > 0; --i) {
+    s[i] = '0' + static_cast<char>(val % 10);
+    val /= 10;
+  }
+  return s;
+}
+
+// Precompute pow10_table[k] = BigInt(10^(2^k)) for k = 0..max_level.
+std::vector<BigInt> precompute_pow10_table(int max_level) {
+  std::vector<BigInt> table(max_level + 1);
+  table[0] = BigInt(10);
+  for (int i = 1; i <= max_level; ++i) {
+    table[i] = table[i - 1];
+    table[i] *= table[i - 1];  // square: 10^(2^i) = (10^(2^(i-1)))^2
+  }
+  return table;
+}
+
+// Estimate the number of decimal digits from the number of base-2^32 limbs.
+// Each limb is ~9.63 decimal digits; we round up.
+int estimate_dec_digits(const BigInt& x) {
+  if (x.size() == 0) return 1;
+  // Top limb contribution
+  uint32_t top = x.size() > 0 ? 0 : 0;
+  // Count bits
+  int bits = static_cast<int>(x.size()) * 32;
+  return static_cast<int>(static_cast<double>(bits) * 0.30103) + 2;
+}
+
+// Recursive helper: convert X to exactly 2^level decimal digits (zero-padded).
+// X must be non-negative and X < pow10[level+1].
+std::string to_dec_padded(BigInt X, int level,
+                          const std::vector<BigInt>& pow10) {
+  if (level <= 3) {
+    // Base case: at most 8 decimal digits, fits in uint64_t
+    return small_to_dec_padded(X.to_uint64(), 1 << level);
+  }
+
+  auto [q, r] = X.div_mod(pow10[level - 1]);
+
+  std::string high = to_dec_padded(std::move(q), level - 1, pow10);
+  std::string low = to_dec_padded(std::move(r), level - 1, pow10);
+
+  return high + low;
+}
+
+}  // anonymous namespace
+
+std::string BigInt::to_string() const {
+  // Handle zero
+  if (digits.empty()) return "0";
+
+  // Handle sign
+  std::string sign;
+  BigInt abs_val = *this;
+  if (is_negative) {
+    sign = "-";
+    abs_val.is_negative = false;
+  }
+
+  // Estimate decimal digits
+  int d = estimate_dec_digits(abs_val);
+
+  // Find the top level: largest k such that 2^k >= d
+  int level = 0;
+  while ((1 << (level + 1)) < d) ++level;
+
+  // Precompute powers of 10
+  auto pow10 = precompute_pow10_table(level);
+
+  // Split: abs_val = Q * 10^(2^level) + R
+  auto [q, r] = abs_val.div_mod(pow10[level]);
+
+  std::string high = to_dec_padded(std::move(q), level, pow10);
+  std::string low = to_dec_padded(std::move(r), level, pow10);
+
+  // Remove leading zeros from high part (but not from low)
+  size_t first_nonzero = high.find_first_not_of('0');
+  if (first_nonzero == std::string::npos) {
+    // Entire number is just the low part
+    size_t lz = low.find_first_not_of('0');
+    if (lz == std::string::npos) return "0";
+    return sign + low.substr(lz);
+  }
+
+  return sign + high.substr(first_nonzero) + low;
+}
+
+// ============================================================
+// from_dec_string (Horner's method — only uses multiply and add)
+// ============================================================
+
+BigInt BigInt::from_dec_string(const std::string& dec_str) {
+  BigInt result;
+  result.is_negative = false;
+
+  size_t start = 0;
+  if (!dec_str.empty() && dec_str[0] == '-') {
+    result.is_negative = true;
+    start = 1;
+  } else if (!dec_str.empty() && dec_str[0] == '+') {
+    start = 1;
+  }
+
+  if (start >= dec_str.size()) {
+    throw std::invalid_argument("Empty number string");
+  }
+
+  // Process 9 decimal digits at a time for efficiency
+  // (10^9 < 2^32, so each chunk fits in one limb)
+  static constexpr uint32_t CHUNK = 1000000000;  // 10^9
+  static constexpr int CHUNK_DIGITS = 9;
+
+  size_t len = dec_str.size() - start;
+
+  // Handle leading digits (less than CHUNK_DIGITS)
+  size_t leading = len % CHUNK_DIGITS;
+  if (leading > 0) {
+    uint32_t val = 0;
+    for (size_t i = 0; i < leading; ++i) {
+      if (dec_str[start + i] < '0' || dec_str[start + i] > '9') {
+        throw std::invalid_argument("Invalid decimal character");
+      }
+      val = val * 10 + (dec_str[start + i] - '0');
+    }
+    result.digits.push_back(val);
+  }
+
+  // Process remaining chunks
+  for (size_t i = leading; i < len; i += CHUNK_DIGITS) {
+    uint32_t val = 0;
+    for (int j = 0; j < CHUNK_DIGITS; ++j) {
+      char c = dec_str[start + i + j];
+      if (c < '0' || c > '9') {
+        throw std::invalid_argument("Invalid decimal character");
+      }
+      val = val * 10 + (c - '0');
+    }
+    // result = result * 10^9 + val
+    // Multiply by CHUNK (single-limb multiply)
+    uint64_t carry = 0;
+    for (auto& d : result.digits) {
+      uint64_t p = static_cast<uint64_t>(d) * CHUNK + carry;
+      d = static_cast<uint32_t>(p);
+      carry = p >> 32;
+    }
+    if (carry) result.digits.push_back(static_cast<uint32_t>(carry));
+
+    // Add val
+    carry = val;
+    for (auto& d : result.digits) {
+      if (carry == 0) break;
+      uint64_t s = static_cast<uint64_t>(d) + carry;
+      d = static_cast<uint32_t>(s);
+      carry = s >> 32;
+    }
+    if (carry) result.digits.push_back(static_cast<uint32_t>(carry));
+  }
+
+  result.trim();
+  return result;
 }
 
 }  // namespace fraction

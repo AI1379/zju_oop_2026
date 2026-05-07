@@ -961,3 +961,141 @@ TEST(FermatElem, FNT8Convolution) {
   EXPECT_EQ(buf_a[24], 32u);  // c[6]
   EXPECT_EQ(buf_a[28], 0u);   // c[7]
 }
+
+// ============================================================
+// Division
+// ============================================================
+
+TEST(BigIntDiv, SmallExact) {
+  EXPECT_EQ(BigInt(100) / BigInt(10), BigInt(10));
+}
+
+TEST(BigIntDiv, SmallRemainder) {
+  EXPECT_EQ(BigInt(7) / BigInt(3), BigInt(2));
+}
+
+TEST(BigIntDiv, ModSmall) {
+  EXPECT_EQ(BigInt(7) % BigInt(3), BigInt(1));
+}
+
+TEST(BigIntDiv, DivByZeroThrows) {
+  EXPECT_THROW(BigInt(42) / BigInt(0), std::invalid_argument);
+}
+
+TEST(BigIntDiv, SmallerDivisor) {
+  EXPECT_EQ(BigInt(0) / BigInt(5), BigInt(0));
+}
+
+TEST(BigIntDiv, NegativeQuotient) {
+  EXPECT_EQ(BigInt(-100) / BigInt(10), BigInt(-10));
+}
+
+TEST(BigIntDiv, DivMultiLimb) {
+  // 0xDEADBEEF00000000 / 0x100000000 = 0xDEADBEEF
+  BigInt a = H("deadbeef00000000");
+  BigInt b = H("0000000100000000");  // 0x100000000 = 2^32
+  EXPECT_EQ(a.size(), 2u);
+  EXPECT_EQ(b.size(), 2u);
+
+  auto [q, r] = a.div_mod(b);
+  EXPECT_EQ(q, H("deadbeef")) << "q hex: " << q.to_hex_string();
+  EXPECT_EQ(r, BigInt(0));
+}
+
+TEST(BigIntDiv, DivModConsistency) {
+  BigInt a = H("123456789abcdef0fedcba9876543210");
+  BigInt b = H("deadbeef");
+  auto [q, r] = a.div_mod(b);
+  EXPECT_EQ(q * b + r, a);
+  EXPECT_TRUE(r == BigInt(0) || (r > BigInt(0) && r < b) || (r < BigInt(0) && -r < b));
+}
+
+TEST(BigIntDiv, LargeDivMod) {
+  // Build a large number and verify divmod roundtrip
+  std::string sa;
+  for (int i = 0; i < 128; ++i) sa += "ffffffff";
+  BigInt a = H(sa);
+  BigInt b = H("123456789abcdef0");
+  auto [q, r] = a.div_mod(b);
+  EXPECT_EQ(q * b + r, a);
+}
+
+// ============================================================
+// from_dec_string / to_string roundtrip
+// ============================================================
+
+TEST(BigIntDecString, Zero) {
+  EXPECT_EQ(BigInt::from_dec_string("0").to_string(), "0");
+}
+
+TEST(BigIntDecString, SmallPositive) {
+  EXPECT_EQ(BigInt::from_dec_string("42").to_string(), "42");
+}
+
+TEST(BigIntDecString, SmallNegative) {
+  EXPECT_EQ(BigInt::from_dec_string("-123").to_string(), "-123");
+}
+
+TEST(BigIntDecString, LeadingZeros) {
+  EXPECT_EQ(BigInt::from_dec_string("0042").to_string(), "42");
+}
+
+TEST(BigIntDecString, LargePowerOf10) {
+  // 10^18 = 1000000000000000000
+  EXPECT_EQ(BigInt::from_dec_string("1000000000000000000").to_string(),
+            "1000000000000000000");
+}
+
+TEST(BigIntDecString, MaxUint64) {
+  EXPECT_EQ(BigInt::from_dec_string("18446744073709551615").to_string(),
+            "18446744073709551615");
+}
+
+TEST(BigIntDecString, MultiLimbRoundtrip) {
+  // A number that spans multiple limbs: 2^64 + 1 = 18446744073709551617
+  std::string s = "18446744073709551617";
+  EXPECT_EQ(BigInt::from_dec_string(s).to_string(), s);
+}
+
+TEST(BigIntDecString, NegativeMultiLimbRoundtrip) {
+  std::string s = "-99999999999999999999";
+  EXPECT_EQ(BigInt::from_dec_string(s).to_string(), s);
+}
+
+TEST(BigIntDecString, VeryLargeRoundtrip) {
+  // 200 digits, starting with a non-zero digit
+  std::string s;
+  for (int i = 0; i < 200; ++i) s += static_cast<char>('0' + ((i + 1) % 10));
+  EXPECT_EQ(BigInt::from_dec_string(s).to_string(), s);
+}
+
+TEST(BigIntDecString, ConstructorDispatch) {
+  // BigInt(const string&) should dispatch to from_dec_string for non-hex
+  EXPECT_EQ(BigInt("12345").to_string(), "12345");
+  EXPECT_EQ(BigInt("-6789").to_string(), "-6789");
+}
+
+TEST(BigIntDecString, HexDispatchStillWorks) {
+  // BigInt(const string&) with 'h' suffix should still use hex
+  auto val = BigInt("deadbeefh");
+  EXPECT_EQ(val, H("deadbeef"));
+}
+
+TEST(BigIntDecString, InvalidCharThrows) {
+  EXPECT_THROW(BigInt::from_dec_string("12a34"), std::invalid_argument);
+}
+
+TEST(BigIntDecString, EmptyThrows) {
+  EXPECT_THROW(BigInt::from_dec_string(""), std::invalid_argument);
+}
+
+TEST(BigIntDecString, JustMinusThrows) {
+  EXPECT_THROW(BigInt::from_dec_string("-"), std::invalid_argument);
+}
+
+TEST(BigIntDecString, ToUint64) {
+  EXPECT_EQ(BigInt(0).to_uint64(), 0ULL);
+  EXPECT_EQ(BigInt(42).to_uint64(), 42ULL);
+  EXPECT_EQ(BigInt(0xFFFFFFFFLL).to_uint64(), 0xFFFFFFFFULL);
+  EXPECT_EQ(H("deadbeef00000000").to_uint64(), 0xDEADBEEF00000000ULL);
+}
