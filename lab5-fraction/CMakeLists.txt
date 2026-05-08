@@ -89,3 +89,14 @@ gtest_discover_tests(int128_test)
 gtest_discover_tests(fraction_bigint_test)
 gtest_discover_tests(fraction_int128_test)
 
+# Benchmark target
+# Set benchmark_DIR before configuring, e.g.:
+#   set benchmark_DIR=D:\lib\benchmark\lib\cmake\benchmark
+find_package(benchmark CONFIG QUIET)
+if(benchmark_FOUND)
+  add_executable(big_int_bench big_int_bench.cpp)
+  target_link_libraries(big_int_bench PRIVATE fraction benchmark::benchmark)
+else()
+  message(WARNING "Google Benchmark not found. Set benchmark_DIR to enable the benchmark target.")
+endif()
+

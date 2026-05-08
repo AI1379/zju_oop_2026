@@ -1009,6 +1009,10 @@ BigInt& BigInt::mul_ssa(const BigInt& other) {
 BigInt& BigInt::divide_inplace(const BigInt& other, DivAlgo algo) {
   switch (algo) {
     case DivAlgo::Auto:
+      if (other.digits.size() > 64) {
+        return div_newton(other);
+      }
+      return div_naive(other);
     case DivAlgo::Naive:
       return div_naive(other);
     case DivAlgo::Newton:
@@ -1198,16 +1202,25 @@ size_t BigInt::newton_reciprocal_core(std::span<const uint32_t> d,
 
   // --- R_new = r * corr ---
   // Overwrites mul_buf (dr is consumed).
+  // Newton step: R_{k+1} = R_k * (2*B^p - d*R_k) ≈ B^{2p}/d.
+  // If target_prec < 2p, right-shift by the excess to get R ≈ B^{target_prec}/d.
   std::fill(mul_buf.begin(), mul_buf.end(), 0);
   detail::mul_dispatch(r_span, corr, mul_buf, karatemp);
   size_t rn_size = r_size + corr_limbs;
   while (rn_size > 0 && mul_buf[rn_size - 1] == 0) --rn_size;
 
-  // Copy result from mul_buf to out
-  std::fill(out.begin(), out.end(), 0);
-  std::copy(mul_buf.begin(), mul_buf.begin() + rn_size, out.begin());
+  size_t excess = 2 * half_prec - target_prec;  // 0 or 1
+  size_t shifted_start = excess;
+  size_t shifted_size = (rn_size > excess) ? rn_size - excess : 0;
 
-  return rn_size;
+  // Copy shifted result to out
+  std::fill(out.begin(), out.end(), 0);
+  if (shifted_size > 0) {
+    std::copy(mul_buf.begin() + shifted_start,
+              mul_buf.begin() + shifted_start + shifted_size, out.begin());
+  }
+
+  return shifted_size;
 }
 
 // Thin wrapper: allocate buffers, call span-level core.
@@ -1271,15 +1284,13 @@ BigInt& BigInt::div_newton(const BigInt& other) {
 
   // q = floor(dividend * R / B^prec)
   // Span-level multiply into pre-allocated product buffer.
-  size_t prod_size = m + R_size;
-  std::vector<uint32_t> product(prod_size, 0);
+  // mul_dispatch needs result of size 2*next_pow2(max(m, R_size)).
+  size_t padded = 1;
+  while (padded < m || padded < R_size) padded *= 2;
+  std::vector<uint32_t> product(2 * padded, 0);
+  std::vector<uint32_t> mul_temp(6 * padded, 0);
 
-  if (prod_size > 0) {
-    // Allocate mul_dispatch temp: 6 * next_pow2(max(m, R_size))
-    size_t padded = 1;
-    while (padded < m || padded < R_size) padded *= 2;
-    std::vector<uint32_t> mul_temp(6 * padded, 0);
-
+  if (m > 0 && R_size > 0) {
     detail::mul_dispatch(
         std::span<const uint32_t>(dividend.digits),
         std::span<const uint32_t>(R_buf).first(R_size),
@@ -1288,8 +1299,9 @@ BigInt& BigInt::div_newton(const BigInt& other) {
   }
 
   // Extract upper limbs (right shift by prec limbs).
+  size_t prod_size = m + R_size;
   if (prod_size > prec) {
-    digits.assign(product.begin() + prec, product.end());
+    digits.assign(product.begin() + prec, product.begin() + prod_size);
   } else {
     digits.clear();
   }
