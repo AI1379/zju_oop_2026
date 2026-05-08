@@ -36,6 +36,18 @@ concept ToStringable = requires(T a) {
   { a.to_string() } -> std::same_as<std::string>;
 };
 
+template <typename T>
+concept DivModable = requires(T a, T b) {
+  { a / b } -> std::same_as<T>;
+  { a % b } -> std::same_as<T>;
+  { a /= b } -> std::same_as<T&>;
+};
+
+template <typename T>
+concept StringConstructible = requires(const std::string& s) {
+  { T(s) } -> std::same_as<T>;
+};
+
 }  // namespace fraction
 
 #endif  // LAB5_FRACTION_CONCEPTS_HPP

@@ -350,6 +350,14 @@ class BigInt {
   // Newton-Raphson reciprocal: compute floor(B^target_prec / d).
   // d must be positive and normalized (leading limb has bit 31 set).
   static BigInt compute_reciprocal(const BigInt& d, size_t target_prec);
+
+  // Span-level Newton reciprocal core. No BigInt temporaries in the
+  // recursive path — only the base case allocates. Returns the number
+  // of significant limbs written to out.
+  static size_t newton_reciprocal_core(std::span<const uint32_t> d,
+                                       size_t target_prec,
+                                       std::span<uint32_t> out,
+                                       std::span<uint32_t> scratch);
 };
 
 // Expose detail types for testing.

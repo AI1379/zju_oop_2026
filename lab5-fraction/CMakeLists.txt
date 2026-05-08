@@ -72,9 +72,20 @@ add_executable(int128_test
 )
 target_link_libraries(int128_test PRIVATE fraction GTest::gtest_main)
 
+add_executable(fraction_bigint_test
+  fraction_bigint_test.cpp
+)
+target_link_libraries(fraction_bigint_test PRIVATE fraction GTest::gtest_main)
+
+add_executable(fraction_int128_test
+  fraction_int128_test.cpp
+)
+target_link_libraries(fraction_int128_test PRIVATE fraction GTest::gtest_main)
 
 include(GoogleTest)
 gtest_discover_tests(fraction_test)
 gtest_discover_tests(big_int_test)
 gtest_discover_tests(int128_test)
+gtest_discover_tests(fraction_bigint_test)
+gtest_discover_tests(fraction_int128_test)
 

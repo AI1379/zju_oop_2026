@@ -667,6 +667,36 @@ void shift_left_small(std::vector<uint32_t>& digits, int bits) {
   if (carry) digits.push_back(carry);
 }
 
+// Span-level multiply dispatcher. No internal allocation.
+// result: zero-initialized, size >= 2 * next_pow2(max(na, nb))
+// temp:   size >= 6 * next_pow2(max(na, nb))
+//   layout: [a_copy: padded][b_copy: padded][karatemp: 4*padded]
+void mul_dispatch(std::span<const uint32_t> a, std::span<const uint32_t> b,
+                  std::span<uint32_t> result, std::span<uint32_t> temp) {
+  size_t na = a.size(), nb = b.size();
+  if (na == 0 || nb == 0) {
+    std::fill(result.begin(), result.end(), 0);
+    return;
+  }
+  if (na < 32 || nb < 32) {
+    std::fill(result.begin(), result.begin() + std::min(result.size(), na + nb), 0);
+    mul_naive_raw(a, b, result);
+    return;
+  }
+  size_t padded = 1;
+  while (padded < na || padded < nb) padded *= 2;
+  auto a_copy = temp.first(padded);
+  auto b_copy = temp.subspan(padded, padded);
+  auto ktemp = temp.subspan(2 * padded);
+  std::fill(a_copy.begin(), a_copy.end(), 0);
+  std::fill(b_copy.begin(), b_copy.end(), 0);
+  std::copy(a.begin(), a.end(), a_copy.begin());
+  std::copy(b.begin(), b.end(), b_copy.begin());
+  auto r = result.first(2 * padded);
+  std::fill(r.begin(), r.end(), 0);
+  karatsuba_core(a_copy, b_copy, r, ktemp);
+}
+
 }  // namespace detail
 
 void BigInt::add_abs(const BigInt& other) {
@@ -1088,51 +1118,112 @@ BigInt& BigInt::div_naive(const BigInt& other) {
 // Newton-Raphson division
 // ============================================================
 
-// Compute floor(B^target_prec / d) using Newton iteration.
+// Zero-allocation Newton reciprocal core.
+// Computes floor(B^target_prec / d) using Newton iteration.
+// All data is passed as spans — no BigInt temporaries.
 //
-// Newton's method for 1/d: x_{k+1} = x_k * (2 - d * x_k).
-// In fixed-point integer arithmetic with scale B^p_k:
-//   R_{k+1} = R_k * (2 * B^{p_k} - d * R_k)
-// Each iteration doubles precision: p_{k+1} = 2 * p_k.
+// Newton step: R_{k+1} = R_k * (2 * B^{p_k} - d * R_k), precision doubles.
 //
-// Base case uses Knuth's Algorithm D (div_naive).
-// Total cost: O(M(target_prec)) dominated by the last multiplication.
-BigInt BigInt::compute_reciprocal(const BigInt& d, size_t target_prec) {
+// scratch layout at each level:
+//   [r_buf: half_prec+1][mul_buf: 2*target_prec][karatemp: rest]
+// Total scratch needed: ~10 * target_prec limbs.
+//
+// Returns the number of significant limbs written to out.
+size_t BigInt::newton_reciprocal_core(std::span<const uint32_t> d,
+                              size_t target_prec,
+                              std::span<uint32_t> out,
+                              std::span<uint32_t> scratch) {
   static constexpr size_t kBaseCaseThreshold = 64;
-  size_t n = d.size();
+  size_t d_size = d.size();
 
-  // Base case: compute B^target_prec / d directly.
-  if (target_prec <= kBaseCaseThreshold || target_prec <= n + 1) {
+  // Trim d to significant limbs
+  while (d_size > 0 && d[d_size - 1] == 0) --d_size;
+  d = d.first(d_size);
+
+  // Base case: fall back to BigInt div_mod (only at recursion leaves).
+  if (target_prec <= kBaseCaseThreshold || target_prec <= d_size + 1) {
+    // Build numerator B^target_prec in out
+    std::fill(out.begin(), out.begin() + target_prec, 0);
+    out[target_prec] = 1;
+
     BigInt numerator;
-    numerator.digits.assign(target_prec, 0);
-    numerator.digits.push_back(1);  // B^target_prec
+    numerator.digits.assign(out.data(), out.data() + target_prec + 1);
     numerator.is_negative = false;
-    auto [q, r] = numerator.div_mod(d, DivAlgo::Naive);
-    return q;
+
+    BigInt divisor_bi;
+    divisor_bi.digits.assign(d.begin(), d.end());
+    divisor_bi.is_negative = false;
+
+    auto [q, r] = numerator.div_mod(divisor_bi, DivAlgo::Naive);
+
+    std::fill(out.begin(), out.end(), 0);
+    std::copy(q.digits.begin(), q.digits.end(), out.begin());
+    return q.digits.size();
   }
 
-  // Recursive Newton step: compute at half precision, then double.
   size_t half_prec = (target_prec + 1) / 2;
-  BigInt r = compute_reciprocal(d, half_prec);
-  // r ≈ B^{half_prec} / d  (underestimate via floor)
 
-  // Newton: R_new = r * (2 * B^{half_prec} - d * r)
-  BigInt dr = d * r;
+  // --- Recursive call: r = B^{half_prec} / d ---
+  // Writes r into out, uses scratch for its own temp.
+  size_t r_size = newton_reciprocal_core(d, half_prec, out, scratch);
 
-  // Construct 2 * B^{half_prec}: digit 2 at limb position half_prec
-  BigInt two_Bh;
-  two_Bh.digits.assign(half_prec + 1, 0);
-  two_Bh.digits[half_prec] = 2;
-  two_Bh.is_negative = false;
+  // Copy r from out into scratch r_buf (first half_prec+1 limbs).
+  auto r_buf = scratch.first(half_prec + 1);
+  std::fill(r_buf.begin(), r_buf.end(), 0);
+  std::copy(out.begin(), out.begin() + r_size, r_buf.begin());
+  auto r_span = r_buf.first(r_size);
 
-  // Since r = floor(B^{half_prec}/d), we have d*r <= B^{half_prec},
-  // so corr = 2*B^{half_prec} - d*r >= B^{half_prec} > 0.
-  BigInt corr = two_Bh - dr;
+  // Subdivide remaining scratch:
+  //   mul_buf:  2 * target_prec limbs (shared by dr and R_new, never live together)
+  //   karatemp: rest (for mul_dispatch)
+  auto mul_buf = scratch.subspan(half_prec + 1, 2 * target_prec);
+  auto karatemp = scratch.subspan(half_prec + 1 + 2 * target_prec);
 
-  // R_new = r * corr ≈ (B^{half_prec}/d) * B^{half_prec} = B^{2*half_prec}/d
-  BigInt R_new = r * corr;
+  // --- dr = d * r ---
+  std::fill(mul_buf.begin(), mul_buf.end(), 0);
+  detail::mul_dispatch(d, r_span, mul_buf, karatemp);
+  size_t dr_size = d_size + r_size;
+  while (dr_size > 0 && mul_buf[dr_size - 1] == 0) --dr_size;
+  auto dr = mul_buf.first(dr_size);
 
-  return R_new;
+  // --- corr = 2 * B^{half_prec} - dr ---
+  // Construct 2*B^{half_prec} inline in out, then subtract dr.
+  size_t corr_limbs = half_prec + 1;
+  std::fill(out.begin(), out.begin() + corr_limbs, 0);
+  out[half_prec] = 2;
+  detail::sub_from(out.first(corr_limbs), dr);
+  // Trim corr
+  while (corr_limbs > 0 && out[corr_limbs - 1] == 0) --corr_limbs;
+  auto corr = out.first(corr_limbs);
+
+  // --- R_new = r * corr ---
+  // Overwrites mul_buf (dr is consumed).
+  std::fill(mul_buf.begin(), mul_buf.end(), 0);
+  detail::mul_dispatch(r_span, corr, mul_buf, karatemp);
+  size_t rn_size = r_size + corr_limbs;
+  while (rn_size > 0 && mul_buf[rn_size - 1] == 0) --rn_size;
+
+  // Copy result from mul_buf to out
+  std::fill(out.begin(), out.end(), 0);
+  std::copy(mul_buf.begin(), mul_buf.begin() + rn_size, out.begin());
+
+  return rn_size;
+}
+
+// Thin wrapper: allocate buffers, call span-level core.
+BigInt BigInt::compute_reciprocal(const BigInt& d, size_t target_prec) {
+  std::vector<uint32_t> out_buf(2 * target_prec + 1, 0);
+  std::vector<uint32_t> scratch(10 * target_prec, 0);
+
+  size_t rsize = newton_reciprocal_core(
+      std::span<const uint32_t>(d.digits), target_prec,
+      std::span<uint32_t>(out_buf), std::span<uint32_t>(scratch));
+
+  BigInt result;
+  result.digits.assign(out_buf.begin(), out_buf.begin() + rsize);
+  result.is_negative = false;
+  result.trim();
+  return result;
 }
 
 BigInt& BigInt::div_newton(const BigInt& other) {
@@ -1161,25 +1252,44 @@ BigInt& BigInt::div_newton(const BigInt& other) {
   }
 
   // Normalize: shift divisor so its leading limb has bit 31 set.
-  // Apply the same shift to the dividend — the quotient is unchanged.
   int shift = detail::clz32(divisor.digits.back());
   if (shift > 0) {
     detail::shift_left_small(divisor.digits, shift);
     detail::shift_left_small(dividend.digits, shift);
   }
 
-  // Compute reciprocal R = floor(B^{m+1} / divisor)
-  // where m = dividend size in limbs.
   size_t m = dividend.size();
   size_t prec = m + 1;
-  BigInt R = compute_reciprocal(divisor, prec);
+
+  // Compute reciprocal using span-based core (2 vector allocations).
+  std::vector<uint32_t> R_buf(2 * prec + 1, 0);
+  std::vector<uint32_t> recip_scratch(10 * prec, 0);
+
+  size_t R_size = newton_reciprocal_core(
+      std::span<const uint32_t>(divisor.digits), prec,
+      std::span<uint32_t>(R_buf), std::span<uint32_t>(recip_scratch));
 
   // q = floor(dividend * R / B^prec)
-  // This is just the upper limbs of the product.
-  BigInt aR = dividend * R;
+  // Span-level multiply into pre-allocated product buffer.
+  size_t prod_size = m + R_size;
+  std::vector<uint32_t> product(prod_size, 0);
 
-  if (aR.size() > prec) {
-    digits.assign(aR.digits.begin() + prec, aR.digits.end());
+  if (prod_size > 0) {
+    // Allocate mul_dispatch temp: 6 * next_pow2(max(m, R_size))
+    size_t padded = 1;
+    while (padded < m || padded < R_size) padded *= 2;
+    std::vector<uint32_t> mul_temp(6 * padded, 0);
+
+    detail::mul_dispatch(
+        std::span<const uint32_t>(dividend.digits),
+        std::span<const uint32_t>(R_buf).first(R_size),
+        std::span<uint32_t>(product),
+        std::span<uint32_t>(mul_temp));
+  }
+
+  // Extract upper limbs (right shift by prec limbs).
+  if (prod_size > prec) {
+    digits.assign(product.begin() + prec, product.end());
   } else {
     digits.clear();
   }
@@ -1197,7 +1307,6 @@ BigInt& BigInt::div_newton(const BigInt& other) {
   if (test <= dividend) {
     *this += one;
   }
-  // Safety: also check for overestimate
   test = *this * divisor;
   while (test > dividend) {
     *this -= one;
