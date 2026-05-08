@@ -365,3 +365,43 @@ TEST(FractionDouble, OneThird) {
 TEST(FractionDouble, WholeNumber) {
   EXPECT_DOUBLE_EQ(static_cast<double>(FractionI(3, 1)), 3.0);
 }
+
+// ============================================================
+// Reduce
+// ============================================================
+
+TEST(FractionReduce, Basic) {
+  FractionI f(2, 4);
+  f.reduce();
+  EXPECT_EQ(f.to_string(), "1/2");
+}
+
+TEST(FractionReduce, AlreadyReduced) {
+  FractionI f(3, 7);
+  f.reduce();
+  EXPECT_EQ(f.to_string(), "3/7");
+}
+
+TEST(FractionReduce, NegativeNumerator) {
+  FractionI f(-6, 9);
+  f.reduce();
+  EXPECT_EQ(f.to_string(), "-2/3");
+}
+
+TEST(FractionReduce, ResultIsOne) {
+  FractionI f(5, 5);
+  f.reduce();
+  EXPECT_EQ(f.to_string(), "1/1");
+}
+
+TEST(FractionReduce, ZeroNumerator) {
+  FractionI f(0, 7);
+  f.reduce();
+  EXPECT_EQ(f.to_string(), "0/1");
+}
+
+TEST(FractionReduce, LargeGCD) {
+  FractionI f(120, 180);
+  f.reduce();
+  EXPECT_EQ(f.to_string(), "2/3");
+}
